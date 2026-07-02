@@ -1,0 +1,49 @@
+# Android SDK (local install for CI-free builds)
+/android-sdk/
+
+# JDK (local install for CI-free builds)
+/java/
+
+# Gradle build output
+.gradle/
+build/
+app/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Native build artifacts (CMake)
+.cxx/
+*.o
+*.so
+
+# SDK downloads / setup scripts
+commandlinetools-*.zip
+java.zip
+yes.txt
+.ignore
+accept_*.bat
+build_apk.bat
+install_sdk.bat
+setup_sdk.bat
+build.ps1
+build_clean.ps1
+local.properties
+
+# Workspace / notes
+*.code-workspace
+IMPLEMENTATION_SUMMARY.md
+
+# OpenCode runtime state
+.omo/
+.slim/
+.opencode/

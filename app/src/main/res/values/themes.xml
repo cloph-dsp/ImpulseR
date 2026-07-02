@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ImpulserCapture" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">#FF4500</item>
+        <item name="colorPrimaryDark">#CC3700</item>
+        <item name="colorAccent">#FFB300</item>
+        <item name="android:statusBarColor">#0A0A0A</item>
+        <item name="android:navigationBarColor">#0A0A0A</item>
+    </style>
+</resources>
