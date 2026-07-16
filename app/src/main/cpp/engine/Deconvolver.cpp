@@ -101,7 +101,9 @@ bool Deconvolver::deconvolve(const float* recorded, int recLen, float** irOut, i
         }
     }
 
-    // Allocate buffers (64-byte aligned for pffft SIMD)
+    // Allocate buffers (64-byte aligned for pffft SIMD).
+    // All buffers hold N floats: this pffft stub uses real-packed spectrum layout,
+    // so Y/H_inv/IR_freq are not complex-packed like the real PFFFT library.
     AlignedFloat y_padded(N_fft, 0.0f);
     AlignedFloat h_inv_padded(N_fft, 0.0f);
     AlignedFloat Y(N_fft, 0.0f);
@@ -138,9 +140,22 @@ bool Deconvolver::deconvolve(const float* recorded, int recLen, float** irOut, i
         applyCalibrationFilter(Y.data(), N_fft);
     }
 
-    // Complex multiplication: IR[k] = Y[k] * H_inv[k]
-    std::memset(IR_freq.data(), 0, N_fft * sizeof(float));
-    pffft_zconvolve_accumulate(mFFTSetup, Y.data(), H_inv.data(), IR_freq.data(), 1.0f);
+    // Real-packed spectrum layout (this pffft stub):
+    //   Y[0 .. N/2]   = real part of bins 0..N/2
+    //   Y[N/2+1 .. N-1] = imag part of bins N/2-1 .. 1 (reverse order)
+    // Bin 0 = DC (imag=0), bin N/2 = Nyquist (imag=0).
+    // Do complex multiplication bin-by-bin on this packed layout.
+    const int half = N_fft / 2;
+    IR_freq[0] = Y[0] * H_inv[0];
+    IR_freq[half] = Y[half] * H_inv[half];
+    for (int k = 1; k < half; ++k) {
+        float yR = Y[k];
+        float yI = Y[N_fft - k];
+        float hR = H_inv[k];
+        float hI = H_inv[N_fft - k];
+        IR_freq[k] = yR * hR - yI * hI;
+        IR_freq[N_fft - k] = yR * hI + yI * hR;
+    }
 
     // Inverse FFT
     pffft_transform_ordered(mFFTSetup, IR_freq.data(), ir_full.data(), work.data(), PFFFT_BACKWARD);
