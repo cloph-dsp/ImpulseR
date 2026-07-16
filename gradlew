@@ -1,16 +1,15 @@
 #!/bin/sh
 
-# Gradle wrapper script
-# Licensed under the Apache License, Version 2.0
+# Gradle wrapper script - POSIX compatible
 
 # Resolve symlinks
-SCRIPT="$0"
+SCRIPT=$0
 while [ -h "$SCRIPT" ]; do
-  DIR="$( cd "$( dirname "$SCRIPT" )" && pwd )"
-  SCRIPT="$( readlink "$SCRIPT" )"
-  [ "${SCRIPT:0:1}" = "/" ] || SCRIPT="$DIR/$SCRIPT"
+  DIR=$( cd "$( dirname "$SCRIPT" )" && pwd )
+  SCRIPT=$( readlink "$SCRIPT" )
+  case "$SCRIPT" in /*) ;; *) SCRIPT="$DIR/$SCRIPT" ;; esac
 done
-DIR="$( cd "$( dirname "$SCRIPT" )" && pwd )"
+DIR=$( cd "$( dirname "$SCRIPT" )" && pwd )
 
 APP_HOME="$DIR"
 CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
