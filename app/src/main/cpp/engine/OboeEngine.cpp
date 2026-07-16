@@ -143,6 +143,7 @@ void OboeEngine::stop() {
 }
 
 void OboeEngine::setPlaybackData(const float* data, int numSamples) {
+    std::lock_guard<std::mutex> lock(mPlaybackMutex);
     mPlaybackData.assign(data, data + numSamples);
     mPlaybackIndex = 0;
     mIsPlaying = true;
@@ -150,6 +151,7 @@ void OboeEngine::setPlaybackData(const float* data, int numSamples) {
 }
 
 void OboeEngine::clearPlaybackData() {
+    std::lock_guard<std::mutex> lock(mPlaybackMutex);
     mIsPlaying = false;
     mPlaybackData.clear();
     mPlaybackIndex = 0;
@@ -162,36 +164,37 @@ oboe::DataCallbackResult OboeEngine::onAudioReady(
     int32_t numFrames) {
 
     if (audioStream->getDirection() == oboe::Direction::Output) {
-        // Output callback - play ESS or silence
         float* outputBuffer = static_cast<float*>(audioData);
-        
-        if (mIsPlaying && !mPlaybackData.empty()) {
-            // Play ESS data - stop after one pass
-            for (int i = 0; i < numFrames; ++i) {
-                if (mPlaybackIndex >= static_cast<int>(mPlaybackData.size())) {
-                    // Playback complete - output silence and stop
-                    std::memset(outputBuffer + i, 0, (numFrames - i) * sizeof(float));
-                    mIsPlaying = false;
-                    break;
+
+        bool playing = mIsPlaying.load();
+        if (playing) {
+            std::lock_guard<std::mutex> lock(mPlaybackMutex);
+            if (!mPlaybackData.empty()) {
+                for (int i = 0; i < numFrames; ++i) {
+                    if (mPlaybackIndex >= static_cast<int>(mPlaybackData.size())) {
+                        std::memset(outputBuffer + i, 0, (numFrames - i) * sizeof(float));
+                        mIsPlaying.store(false);
+                        break;
+                    }
+                    outputBuffer[i] = mPlaybackData[mPlaybackIndex++];
                 }
-                outputBuffer[i] = mPlaybackData[mPlaybackIndex++];
+            } else {
+                std::memset(outputBuffer, 0, numFrames * sizeof(float));
             }
         } else {
-            // Output silence
             std::memset(outputBuffer, 0, numFrames * sizeof(float));
         }
         
     } else if (audioStream->getDirection() == oboe::Direction::Input) {
-        // Input callback - capture audio
+        if (!mCaptureBuffer) return oboe::DataCallbackResult::Continue;
+
         const float* inputBuffer = static_cast<const float*>(audioData);
-        
-        // Write to ring buffer
+
         size_t written = mCaptureBuffer->write(inputBuffer, numFrames);
         if (written < static_cast<size_t>(numFrames)) {
             LOGW("Ring buffer overflow: wrote %zu/%d frames", written, numFrames);
         }
-        
-        // Notify callback if we have enough data
+
         if (mCaptureCallback && mCaptureBuffer->available() >= numFrames) {
             std::vector<float> buffer(numFrames);
             size_t read = mCaptureBuffer->read(buffer.data(), numFrames);
@@ -255,53 +258,49 @@ bool OboeEngine::captureWhilePlaying(const float* essData, int essSamples,
         LOGE("Invalid parameters for captureWhilePlaying");
         return false;
     }
-    
+
     LOGI("Starting capture while playing: %d ESS samples, capturing %d samples",
          essSamples, captureSamples);
-    
-    // Set ESS data for playback
-    mPlaybackData.assign(essData, essData + essSamples);
-    mPlaybackIndex = 0;
-    mIsPlaying = true;
-    
-    // Clear capture buffer
+
+    setPlaybackData(essData, essSamples);
+
+    if (!mCaptureBuffer) {
+        LOGE("mCaptureBuffer is null, aborting capture");
+        return false;
+    }
     mCaptureBuffer->clear();
-    
-    // Start both streams
+
     oboe::Result result = mOutputStream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start output stream: %s", oboe::convertToText(result));
-        mIsPlaying = false;
+        clearPlaybackData();
         return false;
     }
-    
+
     result = mInputStream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start input stream: %s", oboe::convertToText(result));
         mOutputStream->requestStop();
-        mIsPlaying = false;
+        clearPlaybackData();
         return false;
     }
-    
-    // Wait for playback to complete (ESS samples) plus reverb tail
+
     int totalSamples = essSamples + captureSamples;
     int waitCount = 0;
-    int maxWait = (totalSamples * 1000) / mSampleRate + 100; // ms + buffer
-    
+    int maxWait = (totalSamples * 1000) / mSampleRate + 100;
+
     while (mCaptureBuffer->available() < totalSamples && waitCount < maxWait) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         waitCount++;
     }
-    
-    // Stop streams
+
     mInputStream->requestStop();
     mOutputStream->requestStop();
-    mIsPlaying = false;
-    
-    // Read captured audio
+    clearPlaybackData();
+
     int captured = mCaptureBuffer->read(captureBuffer, captureSamples);
     LOGI("Captured %d samples", captured);
-    
+
     return captured > 0;
 }
 

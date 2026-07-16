@@ -79,6 +79,7 @@ class MainActivity : ComponentActivity() {
             var trimEnd by remember { mutableFloatStateOf(1f) }
             var statusMessage by remember { mutableStateOf("Tap ARM to start") }
             var isProcessing by remember { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
             
             LaunchedEffect(Unit) {
                 NativeEngine.appState.collect { state ->
@@ -91,7 +92,7 @@ class MainActivity : ComponentActivity() {
                         AppState.REVIEW -> UIState.REVIEW
                         AppState.EXPORTING -> UIState.EXPORTING
                     }
-                    isProcessing = state == AppState.PROCESSING || state == AppState.CALIBRATING || state == AppState.EXPORTING
+                    isProcessing = state == AppState.SWEEPING || state == AppState.PROCESSING || state == AppState.CALIBRATING || state == AppState.EXPORTING
                     
                     if (state == AppState.REVIEW) {
                         irSampleCount = NativeEngine.trimEnd.value - NativeEngine.trimStart.value
@@ -112,24 +113,41 @@ class MainActivity : ComponentActivity() {
                     delay(100)
                     when (uiState) {
                         UIState.CALIBRATING -> {
-                            sweepProgress = (sweepProgress + 0.02f).coerceAtMost(1f)
+                            sweepProgress = NativeEngine.getProcessingProgress()
                             spectrumData = generateSweepSpectrum(sweepProgress)
                         }
                         UIState.SWEEPING -> {
-                            // Check if sweep completed
                             NativeEngine.checkSweepComplete()
                             sweepProgress = (sweepProgress + 0.02f).coerceAtMost(1f)
                             spectrumData = generateSweepSpectrum(sweepProgress)
                         }
                         UIState.PROCESSING -> {
-                            sweepProgress = (sweepProgress + 0.02f).coerceAtMost(1f)
+                            sweepProgress = NativeEngine.getProcessingProgress()
                             spectrumData = generateProcessingSpectrum(sweepProgress)
                         }
                         else -> {}
                     }
                 }
             }
-            
+
+            LaunchedEffect(uiState) {
+                when (uiState) {
+                    UIState.SWEEPING, UIState.PROCESSING -> {
+                        spectrumData = FloatArray(64) { 0f }
+                    }
+                    else -> {}
+                }
+            }
+
+            LaunchedEffect(uiState) {
+                if (uiState == UIState.CALIBRATING || uiState == UIState.PROCESSING) {
+                    while (uiState == UIState.CALIBRATING || uiState == UIState.PROCESSING) {
+                        sweepProgress = NativeEngine.getProcessingProgress()
+                        delay(50)
+                    }
+                }
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -157,7 +175,12 @@ class MainActivity : ComponentActivity() {
                             UIState.ERROR -> "ERROR"
                             UIState.EXPORTING -> "EXPORTING..."
                         },
-                        color = Color(0xFFFF4500),
+                        color = when (uiState) {
+                            UIState.SWEEPING -> Color(0xFFFF1744)
+                            UIState.PROCESSING -> Color(0xFFFFB300)
+                            UIState.CALIBRATING -> Color(0xFFFFB300)
+                            else -> Color(0xFFFF4500)
+                        },
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 24.sp,
@@ -165,7 +188,32 @@ class MainActivity : ComponentActivity() {
                             .align(Alignment.TopStart)
                             .padding(16.dp)
                     )
-                    
+
+                    if (uiState == UIState.CALIBRATING || uiState == UIState.PROCESSING) {
+                        LinearProgressIndicator(
+                            progress = { sweepProgress.coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 32.dp),
+                            color = Color(0xFFFFB300),
+                            trackColor = Color(0xFF333333)
+                        )
+                    }
+
+                    if (uiState == UIState.SWEEPING) {
+                        Text(
+                            text = "● REC",
+                            color = Color(0xFFFF1744),
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(16.dp)
+                        )
+                    }
+
                     Row(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -195,7 +243,9 @@ class MainActivity : ComponentActivity() {
                     // Calibration button
                     Button(
                         onClick = {
-                            NativeEngine.runCalibration()
+                            scope.launch(Dispatchers.IO) {
+                                NativeEngine.runCalibration()
+                            }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -221,7 +271,9 @@ class MainActivity : ComponentActivity() {
                                     NativeEngine.arm()
                                 }
                                 UIState.ARMED -> {
-                                    NativeEngine.startSweep()
+                                    scope.launch(Dispatchers.IO) {
+                                        NativeEngine.startSweep()
+                                    }
                                 }
                                 UIState.REVIEW -> {
                                     keepScreenOn = false
@@ -383,15 +435,20 @@ if (uiState == UIState.REVIEW && irSampleCount > 0) {
                             UIState.IDLE -> "48kHz · 24bit · mono"
                             UIState.CALIBRATING -> "Calibrating hardware..."
                             UIState.ARMED -> "Ready to capture"
-                            UIState.SWEEPING -> "Playing ESS & recording..."
+                            UIState.SWEEPING -> "Recording sweep response..."
                             UIState.PROCESSING -> "Deconvolving IR..."
                             UIState.REVIEW -> if (irSampleCount > 0) "IR: $irSampleCount samples" else "IR captured"
                             UIState.ERROR -> "Error - check logs"
                             UIState.EXPORTING -> "Exporting..."
                         },
-                        color = Color(0xFF808080),
+                        color = when (uiState) {
+                            UIState.SWEEPING -> Color(0xFFFF1744)
+                            UIState.PROCESSING, UIState.CALIBRATING -> Color(0xFFFFB300)
+                            else -> Color(0xFF808080)
+                        },
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp
+                        fontSize = 12.sp,
+                        fontWeight = if (uiState == UIState.SWEEPING || uiState == UIState.PROCESSING || uiState == UIState.CALIBRATING) FontWeight.Bold else FontWeight.Normal
                     )
                     
                     Text(

@@ -167,10 +167,11 @@ private:
     // Callback
     IRCaptureCallback* mCaptureCallback = nullptr;
 
-    // Playback data
+    // Playback data (mutex protects mPlaybackData + mPlaybackIndex from audio thread vs control thread)
     std::vector<float> mPlaybackData;
     int mPlaybackIndex = 0;
     std::atomic<bool> mIsPlaying{false};
+    std::mutex mPlaybackMutex;
 
     // Ring buffer for captured audio
     std::unique_ptr<RingBuffer<float>> mCaptureBuffer;

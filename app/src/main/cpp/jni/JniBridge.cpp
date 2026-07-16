@@ -59,6 +59,7 @@ static std::vector<float> gProcessedIR;
 static std::atomic<bool> gSweepRunning{false};
 static std::atomic<float> gProcessingProgress{0.0f};
 static std::mutex gMutex;
+static std::mutex gProcessMutex;  // ponytail: serializes deconvolve+process so SWEEPING auto-stop races can't double-process
 static float gSpectrumData[kSpectrumBins] = {0};
 static int gTrimStart = 0;
 static int gTrimEnd = 0;
@@ -148,6 +149,11 @@ Java_com_impulser_engine_NativeEngine_nativeGetState(JNIEnv* env, jobject thiz) 
     return static_cast<jint>(gAppState.load());
 }
 
+JNIEXPORT jfloat JNICALL
+Java_com_impulser_engine_NativeEngine_nativeGetProcessingProgress(JNIEnv* env, jobject thiz) {
+    return gProcessingProgress.load();
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_impulser_engine_NativeEngine_nativeArm(JNIEnv* env, jobject thiz) {
     LOGI("Arming capture");
@@ -196,67 +202,79 @@ Java_com_impulser_engine_NativeEngine_nativeStartSweep(JNIEnv* env, jobject thiz
     return JNI_TRUE;
 }
 
-JNIEXPORT void JNICALL
-Java_com_impulser_engine_NativeEngine_nativeStopSweep(JNIEnv* env, jobject thiz) {
-    LOGI("Stopping sweep");
-    
-    gSweepRunning.store(false);
-    
-    if (gOboeEngine) {
-        gOboeEngine->clearPlaybackData();
-        gOboeEngine->stop();
+static bool finishSweepProcessing() {
+    std::lock_guard<std::mutex> processLock(gProcessMutex);
+
+    if (gAppState.load() != PROCESSING) {
+        return false;
     }
-    
-    gAppState.store(PROCESSING);
-    gProcessingProgress.store(0.0f);
-    
+
     std::vector<float> recordedAudio;
     {
         std::lock_guard<std::mutex> lock(gMutex);
         recordedAudio = gCapturedAudio;
     }
-    
+
     LOGI("Processing %zu captured samples", recordedAudio.size());
-    
+
     if (recordedAudio.empty()) {
         LOGE("No audio captured");
         gAppState.store(IDLE);
-        return;
+        return false;
     }
-    
+
     gProcessingProgress.store(0.2f);
-    
+
     float* irFull = nullptr;
     int irFullLen = 0;
-    
-    if (!gDeconvolver->deconvolve(recordedAudio.data(), 
+
+    if (!gDeconvolver->deconvolve(recordedAudio.data(),
                                    static_cast<int>(recordedAudio.size()),
                                    &irFull, &irFullLen)) {
         LOGE("Deconvolution failed");
         gAppState.store(IDLE);
-        return;
+        return false;
     }
-    
+
     gProcessingProgress.store(0.5f);
-    
+
     float* processedIR = nullptr;
     int processedLen = 0;
-    
+
     if (gIRProcessor->process(irFull, irFullLen, &processedIR, &processedLen)) {
-        if (irFull) delete[] irFull;
+        delete[] irFull;
         gProcessedIR.assign(processedIR, processedIR + processedLen);
-        if (processedIR) delete[] processedIR;
+        delete[] processedIR;
         gIrLength = processedLen;
         gTrimStart = 0;
         gTrimEnd = processedLen;
         gProcessingProgress.store(1.0f);
         gAppState.store(REVIEW);
         LOGI("Processing complete: %d IR samples", processedLen);
+        return true;
     } else {
-        if (irFull) delete[] irFull;
+        delete[] irFull;
         LOGE("IR processing failed");
         gAppState.store(IDLE);
+        return false;
     }
+}
+
+JNIEXPORT void JNICALL
+Java_com_impulser_engine_NativeEngine_nativeStopSweep(JNIEnv* env, jobject thiz) {
+    LOGI("Stopping sweep");
+
+    gSweepRunning.store(false);
+
+    if (gOboeEngine) {
+        gOboeEngine->clearPlaybackData();
+        gOboeEngine->stop();
+    }
+
+    gAppState.store(PROCESSING);
+    gProcessingProgress.store(0.0f);
+
+    finishSweepProcessing();
 }
 
 JNIEXPORT jboolean JNICALL
@@ -355,69 +373,9 @@ JNIEXPORT jfloatArray JNICALL
 Java_com_impulser_capture_MainActivity_nativeGetSpectrumData(JNIEnv* env, jobject thiz) {
     jfloatArray result = env->NewFloatArray(kSpectrumBins);
     if (result == nullptr) return nullptr;
-    
+
     AppState state = gAppState.load();
-    
-    // Auto-stop sweep when playback completes
-    if (state == SWEEPING && gSweepRunning.load()) {
-        if (gOboeEngine && gOboeEngine->isPlaybackComplete()) {
-            LOGI("Playback complete, auto-stopping sweep");
-            gSweepRunning.store(false);
-            gOboeEngine->stop();
-            
-            // Transition to PROCESSING state
-            gAppState.store(PROCESSING);
-            gProcessingProgress.store(0.0f);
-            
-            // Process captured audio
-            std::vector<float> recordedAudio;
-            {
-                std::lock_guard<std::mutex> lock(gMutex);
-                recordedAudio = gCapturedAudio;
-            }
-            
-            LOGI("Processing %zu captured samples", recordedAudio.size());
-            
-            if (!recordedAudio.empty()) {
-                gProcessingProgress.store(0.2f);
-                
-                float* irFull = nullptr;
-                int irFullLen = 0;
-                
-                if (gDeconvolver->deconvolve(recordedAudio.data(), 
-                                             static_cast<int>(recordedAudio.size()),
-                                             &irFull, &irFullLen)) {
-                    gProcessingProgress.store(0.5f);
-                    
-                    float* processedIR = nullptr;
-                    int processedLen = 0;
-                    
-                    if (gIRProcessor->process(irFull, irFullLen, &processedIR, &processedLen)) {
-                        if (irFull) delete[] irFull;
-                        gProcessedIR.assign(processedIR, processedIR + processedLen);
-                        if (processedIR) delete[] processedIR;
-                        gIrLength = processedLen;
-                        gTrimStart = 0;
-                        gTrimEnd = processedLen;
-                        gProcessingProgress.store(1.0f);
-                        gAppState.store(REVIEW);
-                        LOGI("Processing complete: %d IR samples", processedLen);
-                    } else {
-                        if (irFull) delete[] irFull;
-                        LOGE("IR processing failed");
-                        gAppState.store(IDLE);
-                    }
-                } else {
-                    LOGE("Deconvolution failed");
-                    gAppState.store(IDLE);
-                }
-            } else {
-                LOGE("No audio captured");
-                gAppState.store(IDLE);
-            }
-        }
-    }
-    
+
     if (state == SWEEPING && gSweepRunning.load()) {
         std::lock_guard<std::mutex> lock(gMutex);
         if (!gCapturedAudio.empty()) {
@@ -563,68 +521,19 @@ Java_com_impulser_engine_NativeEngine_nativeCheckSweepComplete(JNIEnv* env, jobj
     if (gAppState.load() != SWEEPING || !gSweepRunning.load()) {
         return JNI_FALSE;
     }
-    
+
     if (gOboeEngine && gOboeEngine->isPlaybackComplete()) {
         LOGI("Playback complete, auto-stopping sweep");
         gSweepRunning.store(false);
         gOboeEngine->stop();
-        
-        // Transition to PROCESSING state
+
         gAppState.store(PROCESSING);
         gProcessingProgress.store(0.0f);
-        
-        // Process captured audio
-        std::vector<float> recordedAudio;
-        {
-            std::lock_guard<std::mutex> lock(gMutex);
-            recordedAudio = gCapturedAudio;
-        }
-        
-        LOGI("Processing %zu captured samples", recordedAudio.size());
-        
-        if (recordedAudio.empty()) {
-            LOGE("No audio captured");
-            gAppState.store(IDLE);
-            return JNI_TRUE;
-        }
-        
-        gProcessingProgress.store(0.2f);
-        
-        float* irFull = nullptr;
-        int irFullLen = 0;
-        
-        if (!gDeconvolver->deconvolve(recordedAudio.data(), 
-                                         static_cast<int>(recordedAudio.size()),
-                                         &irFull, &irFullLen)) {
-            LOGE("Deconvolution failed");
-            gAppState.store(IDLE);
-            return JNI_TRUE;
-        }
-        
-        gProcessingProgress.store(0.5f);
-        
-        float* processedIR = nullptr;
-        int processedLen = 0;
-        
-        if (gIRProcessor->process(irFull, irFullLen, &processedIR, &processedLen)) {
-            if (irFull) delete[] irFull;
-            gProcessedIR.assign(processedIR, processedIR + processedLen);
-            if (processedIR) delete[] processedIR;
-            gIrLength = processedLen;
-            gTrimStart = 0;
-            gTrimEnd = processedLen;
-            gProcessingProgress.store(1.0f);
-            gAppState.store(REVIEW);
-            LOGI("Processing complete: %d IR samples", processedLen);
-        } else {
-            if (irFull) delete[] irFull;
-            LOGE("IR processing failed");
-            gAppState.store(IDLE);
-        }
-        
+
+        finishSweepProcessing();
         return JNI_TRUE;
     }
-    
+
     return JNI_FALSE;
 }
 

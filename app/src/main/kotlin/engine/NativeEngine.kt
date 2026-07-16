@@ -208,6 +208,11 @@ object NativeEngine {
         if (nativeHandle == 0L) return 0
         return nativeGetSpectrogramTexId()
     }
+
+    fun getProcessingProgress(): Float {
+        if (nativeHandle == 0L) return 0f
+        return nativeGetProcessingProgress()
+    }
     
     fun setSpectrogramSurface(surfacePtr: Long) {
         if (nativeHandle == 0L) return
@@ -241,7 +246,9 @@ fun loadCalibration(key: String): String {
     
     fun checkSweepComplete(): Boolean {
         if (nativeHandle == 0L) return false
-        return nativeCheckSweepComplete()
+        val completed = nativeCheckSweepComplete()
+        if (completed) updateState()  // sync UI with native state change
+        return completed
     }
 
     private fun updateState() {
@@ -252,6 +259,7 @@ fun loadCalibration(key: String): String {
     private external fun nativeCreate(): Long
     private external fun nativeDestroy()
     private external fun nativeGetState(): Int
+    private external fun nativeGetProcessingProgress(): Float
     private external fun nativeArm(): Boolean
     private external fun nativeStartSweep(): Boolean
     private external fun nativeStopSweep()
