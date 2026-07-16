@@ -2,10 +2,36 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
+#include <vector>
 #include <android/log.h>
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Deconvolver", __VA_ARGS__)
+
+namespace impulser {
+
+template<typename T, size_t Alignment>
+struct AlignedAllocator {
+    using value_type = T;
+
+    T* allocate(size_t n) {
+        if (n == 0) return nullptr;
+        void* ptr = nullptr;
+        if (posix_memalign(&ptr, Alignment, n * sizeof(T)) != 0) {
+            throw std::bad_alloc();
+        }
+        return static_cast<T*>(ptr);
+    }
+
+    void deallocate(T* ptr, size_t) noexcept {
+        std::free(ptr);
+    }
+};
+
+using AlignedFloat = std::vector<float, AlignedAllocator<float, 64>>;
+
+} // namespace impulser
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -75,14 +101,14 @@ bool Deconvolver::deconvolve(const float* recorded, int recLen, float** irOut, i
         }
     }
 
-    // Allocate buffers
-    std::vector<float> y_padded(N_fft, 0.0f);
-    std::vector<float> h_inv_padded(N_fft, 0.0f);
-    std::vector<float> Y(N_fft, 0.0f);
-    std::vector<float> H_inv(N_fft, 0.0f);
-    std::vector<float> IR_freq(N_fft, 0.0f);
-    std::vector<float> ir_full(N_fft, 0.0f);
-    std::vector<float> work(N_fft, 0.0f);
+    // Allocate buffers (64-byte aligned for pffft SIMD)
+    AlignedFloat y_padded(N_fft, 0.0f);
+    AlignedFloat h_inv_padded(N_fft, 0.0f);
+    AlignedFloat Y(N_fft, 0.0f);
+    AlignedFloat H_inv(N_fft, 0.0f);
+    AlignedFloat IR_freq(N_fft, 0.0f);
+    AlignedFloat ir_full(N_fft, 0.0f);
+    AlignedFloat work(N_fft, 0.0f);
 
     // Copy recorded signal with latency compensation
     int delay = mRoundTripDelaySamples;

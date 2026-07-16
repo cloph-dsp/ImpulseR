@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
                     delay(100)
                     when (uiState) {
                         UIState.CALIBRATING -> {
-                            sweepProgress = NativeEngine.getProcessingProgress()
+                            sweepProgress = (sweepProgress + 0.02f).coerceAtMost(1f)
                             spectrumData = generateSweepSpectrum(sweepProgress)
                         }
                         UIState.SWEEPING -> {

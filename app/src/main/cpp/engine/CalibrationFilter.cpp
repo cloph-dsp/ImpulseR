@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
+#include <vector>
 #include <fstream>
 #include <sstream>
 #include <android/log.h>
@@ -13,6 +15,30 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+
+namespace impulser {
+
+template<typename T, size_t Alignment>
+struct AlignedAllocator {
+    using value_type = T;
+
+    T* allocate(size_t n) {
+        if (n == 0) return nullptr;
+        void* ptr = nullptr;
+        if (posix_memalign(&ptr, Alignment, n * sizeof(T)) != 0) {
+            throw std::bad_alloc();
+        }
+        return static_cast<T*>(ptr);
+    }
+
+    void deallocate(T* ptr, size_t) noexcept {
+        std::free(ptr);
+    }
+};
+
+using AlignedFloat = std::vector<float, AlignedAllocator<float, 64>>;
+
+} // namespace impulser
 
 namespace impulser {
 
@@ -222,13 +248,13 @@ bool CalibrationFilter::computeTransferFunction(const float* recorded, int recLe
         return false;
     }
     
-    // Allocate buffers
-    std::vector<float> y_padded(N_fft, 0.0f);
-    std::vector<float> x_padded(N_fft, 0.0f);
-    std::vector<float> Y(N_fft, 0.0f);
-    std::vector<float> X(N_fft, 0.0f);
-    std::vector<float> H_dev(N_fft, 0.0f);
-    std::vector<float> work(N_fft, 0.0f);
+    // Allocate buffers (64-byte aligned for pffft SIMD)
+    AlignedFloat y_padded(N_fft, 0.0f);
+    AlignedFloat x_padded(N_fft, 0.0f);
+    AlignedFloat Y(N_fft, 0.0f);
+    AlignedFloat X(N_fft, 0.0f);
+    AlignedFloat H_dev(N_fft, 0.0f);
+    AlignedFloat work(N_fft, 0.0f);
     
     // Copy signals
     std::memcpy(y_padded.data(), recorded, recLen * sizeof(float));
