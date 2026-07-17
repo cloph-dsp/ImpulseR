@@ -85,7 +85,29 @@ public:
      */
     int getSampleRate() const { return mSampleRate; }
 
-/**
+    /**
+     * Get the playback progress (0.0 to 1.0).
+     * Uses double for precision, returns as float for JNI compatibility.
+     * 
+     * @return Progress 0.0-1.0, or 0.0 if no playback data
+     */
+    float getPlaybackProgress() {
+        std::lock_guard<std::mutex> lock(mPlaybackMutex);
+        if (mPlaybackData.empty()) return 0.0f;
+        return static_cast<float>(static_cast<double>(mPlaybackIndex) / mPlaybackData.size());
+    }
+
+    /**
+     * Get FFT magnitude spectrum of the last 1024 playback samples.
+     * Reads last 1024 samples of mPlaybackData (zero-pads if not enough),
+     * computes log-magnitude spectrum, returns first nBins bins.
+     * 
+     * @param outBins Output array for magnitude bins (size nBins)
+     * @param nBins Number of bins to output
+     */
+    void getCurrentSpectrum(float* outBins, int nBins);
+
+    /**
       * Get the ring buffer containing captured audio.
       * 
       * @return Pointer to the ring buffer
@@ -152,6 +174,10 @@ private:
     // Audio streams
     std::shared_ptr<oboe::AudioStream> mOutputStream;
     std::shared_ptr<oboe::AudioStream> mInputStream;
+
+    // Deferred-close guards: ensure close() is called exactly once per stream
+    std::atomic<bool> mInputStopCompleted{false};
+    std::atomic<bool> mOutputStopCompleted{false};
 
     // Configuration
     static constexpr int kSampleRate = 48000;

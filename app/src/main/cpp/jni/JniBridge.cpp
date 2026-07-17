@@ -32,6 +32,7 @@ constexpr float kLog1000 = 6.907755f;
 constexpr float kFreq20 = 20.0f;
 constexpr float kFreq20k = 20000.0f;
 constexpr float kInv63 = 0.015873f;
+constexpr int kInputWindowSize = 1024;
 }
 
 enum AppState {
@@ -154,6 +155,71 @@ Java_com_impulser_engine_NativeEngine_nativeGetProcessingProgress(JNIEnv* env, j
     return gProcessingProgress.load();
 }
 
+JNIEXPORT jfloat JNICALL
+Java_com_impulser_engine_NativeEngine_nativeGetPlaybackProgress(JNIEnv* env, jobject thiz) {
+    if (!gOboeEngine) return 0.0f;
+    return static_cast<jfloat>(gOboeEngine->getPlaybackProgress());
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_impulser_engine_NativeEngine_nativeGetInputLevel(JNIEnv* env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    if (gCapturedAudio.empty()) return 0.0f;
+    int windowSize = std::min(static_cast<int>(gCapturedAudio.size()), kInputWindowSize);
+    int start = gCapturedAudio.size() - windowSize;
+    float sumSquares = 0.0f;
+    for (int i = start; i < static_cast<int>(gCapturedAudio.size()); i++) {
+        float s = gCapturedAudio[i];
+        sumSquares += s * s;
+    }
+    float rms = std::sqrt(sumSquares / windowSize);
+    return std::min(rms, 1.0f);
+}
+
+JNIEXPORT void JNICALL
+Java_com_impulser_engine_NativeEngine_nativeGetCurrentSpectrum(JNIEnv* env, jobject thiz, jfloatArray jBins, jint nBins) {
+    if (!gOboeEngine || jBins == nullptr || nBins <= 0) {
+        return;
+    }
+
+    std::vector<float> bins(nBins);
+    gOboeEngine->getCurrentSpectrum(bins.data(), nBins);
+
+    env->SetFloatArrayRegion(jBins, 0, nBins, bins.data());
+}
+
+static void getIRSpectrum(float* outBins, int nBins) {
+    if (outBins == nullptr || nBins <= 0) {
+        return;
+    }
+
+    if (gProcessedIR.empty()) {
+        for (int i = 0; i < nBins; i++) {
+            outBins[i] = 0.0f;
+        }
+        return;
+    }
+
+    // Use computeMagnitudeSpectrum from CalibrationFilter
+    CalibrationFilter::computeMagnitudeSpectrum(
+        gProcessedIR.data(),
+        static_cast<int>(gProcessedIR.size()),
+        outBins,
+        nBins);
+}
+
+JNIEXPORT void JNICALL
+Java_com_impulser_engine_NativeEngine_nativeGetIRSpectrum(JNIEnv* env, jobject thiz, jfloatArray jBins, jint nBins) {
+    if (jBins == nullptr || nBins <= 0) {
+        return;
+    }
+
+    std::vector<float> bins(nBins);
+    getIRSpectrum(bins.data(), nBins);
+
+    env->SetFloatArrayRegion(jBins, 0, nBins, bins.data());
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_impulser_engine_NativeEngine_nativeArm(JNIEnv* env, jobject thiz) {
     LOGI("Arming capture");
@@ -248,6 +314,22 @@ static bool finishSweepProcessing() {
         gIrLength = processedLen;
         gTrimStart = 0;
         gTrimEnd = processedLen;
+
+        // Apply 10ms raised-cosine fade to both ends to prevent click artifacts
+        int nFade = static_cast<int>(gSampleRate / 100); // 480 samples at 48kHz
+        int irLen = static_cast<int>(gProcessedIR.size());
+        if (nFade > irLen / 3) nFade = irLen / 3;
+        if (nFade > 0) {
+            for (int i = 0; i < nFade; i++) {
+                float fadeIn = 0.5f - 0.5f * std::cos(static_cast<float>(M_PI) * i / nFade);
+                gProcessedIR[i] *= fadeIn;
+            }
+            for (int i = 0; i < nFade; i++) {
+                float fadeOut = 0.5f + 0.5f * std::cos(static_cast<float>(M_PI) * i / nFade);
+                gProcessedIR[irLen - nFade + i] *= fadeOut;
+            }
+        }
+
         gProcessingProgress.store(1.0f);
         gAppState.store(REVIEW);
         LOGI("Processing complete: %d IR samples", processedLen);

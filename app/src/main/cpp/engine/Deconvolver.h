@@ -2,7 +2,7 @@
 
 #include <vector>
 #include <memory>
-#include "pffft.h"
+#include <complex>
 
 namespace impulser {
 
@@ -83,9 +83,9 @@ private:
      * @param spectrum Complex spectrum to modify
      * @param N FFT size
      */
-    void applyCalibrationFilter(float* spectrum, int N);
+    void applyCalibrationFilter(std::complex<float>* spectrum, int N);
 
-/**
+    /**
       * Isolate the linear IR from the full deconvolved signal.
       * 
       * @param irFull Full deconvolved signal
@@ -111,10 +111,6 @@ private:
     
     // Latency compensation
     int mRoundTripDelaySamples = 0;
-    
-    // PFFFT setup
-    PFFFT_Setup* mFFTSetup = nullptr;
-    int mCurrentFFTSize = 0;
 };
 
 } // namespace impulser

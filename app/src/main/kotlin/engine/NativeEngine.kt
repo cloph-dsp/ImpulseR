@@ -213,7 +213,37 @@ object NativeEngine {
         if (nativeHandle == 0L) return 0f
         return nativeGetProcessingProgress()
     }
-    
+
+    fun getPlaybackProgress(): Float {
+        if (nativeHandle == 0L) return 0f
+        return nativeGetPlaybackProgress()
+    }
+
+    fun getInputLevel(): Float {
+        if (nativeHandle == 0L) return 0f
+        return nativeGetInputLevel()
+    }
+
+    fun getCurrentSpectrum(bins: FloatArray): Boolean {
+        if (nativeHandle == 0L) return false
+        return try {
+            nativeGetCurrentSpectrum(bins)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun getIRSpectrum(bins: FloatArray): Boolean {
+        if (nativeHandle == 0L) return false
+        return try {
+            nativeGetIRSpectrum(bins)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun setSpectrogramSurface(surfacePtr: Long) {
         if (nativeHandle == 0L) return
         nativeSetSpectrogramSurface(surfacePtr)
@@ -260,6 +290,10 @@ fun loadCalibration(key: String): String {
     private external fun nativeDestroy()
     private external fun nativeGetState(): Int
     private external fun nativeGetProcessingProgress(): Float
+    private external fun nativeGetPlaybackProgress(): Float
+    private external fun nativeGetInputLevel(): Float
+    private external fun nativeGetCurrentSpectrum(bins: FloatArray)
+    private external fun nativeGetIRSpectrum(bins: FloatArray)
     private external fun nativeArm(): Boolean
     private external fun nativeStartSweep(): Boolean
     private external fun nativeStopSweep()

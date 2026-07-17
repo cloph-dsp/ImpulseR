@@ -14,23 +14,6 @@ set(CMAKE_C_FLAGS_RELEASE "-O3 -ffast-math")
 set(OBOE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/oboe-1.8.0)
 add_subdirectory(${OBOE_DIR} oboe)
 
-# PFFFT library (static)
-add_library(pffft STATIC
-    third_party/pffft/pffft.c
-    third_party/pffft/pffft.h
-)
-
-target_include_directories(pffft PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pffft
-)
-
-# Enable NEON on ARM
-if(ANDROID_ABI STREQUAL "arm64-v8a")
-    target_compile_options(pffft PRIVATE -mfpu=neon -mfloat-abi=softfp)
-elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
-    target_compile_options(pffft PRIVATE -mfpu=neon -mfloat-abi=softfp)
-endif()
-
 # Main native library
 add_library(impulser_capture SHARED
     engine/OboeEngine.cpp
@@ -58,7 +41,6 @@ target_link_libraries(impulser_capture
     GLESv3
     EGL
     oboe
-    pffft
 )
 
 # Enable NEON on ARM for main library

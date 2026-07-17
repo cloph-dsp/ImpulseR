@@ -1,12 +1,16 @@
 package com.impulser.capture
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -23,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.documentfile.provider.DocumentFile
 import com.impulser.engine.AppState
 import com.impulser.engine.NativeEngine
 import kotlinx.coroutines.*
@@ -72,14 +77,33 @@ class MainActivity : ComponentActivity() {
         setContent {
             var uiState by remember { mutableStateOf(UIState.IDLE) }
             var spectrumData by remember { mutableStateOf(FloatArray(64) { 0f }) }
+            var cachedIR by remember { mutableStateOf(FloatArray(64) { 0f }) }
             var sweepProgress by remember { mutableStateOf(0f) }
+            var inputLevel by remember { mutableStateOf(0f) }
             var showExportSuccess by remember { mutableStateOf<String?>(null) }
             var irSampleCount by remember { mutableIntStateOf(0) }
             var trimStart by remember { mutableFloatStateOf(0f) }
             var trimEnd by remember { mutableFloatStateOf(1f) }
             var statusMessage by remember { mutableStateOf("Tap ARM to start") }
             var isProcessing by remember { mutableStateOf(false) }
+            var irFilename by remember { mutableStateOf("") }
+            var chosenFolderUri by remember { mutableStateOf<Uri?>(null) }
             val scope = rememberCoroutineScope()
+            val ctx = this@MainActivity
+
+            val folderPickerLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.OpenDocumentTree()
+            ) { uri ->
+            uri?.let {
+                runCatching {
+                    contentResolver.takePersistableUriPermission(
+                        it,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                }
+                chosenFolderUri = it
+            }
+            }
             
             LaunchedEffect(Unit) {
                 NativeEngine.appState.collect { state ->
@@ -92,7 +116,7 @@ class MainActivity : ComponentActivity() {
                         AppState.REVIEW -> UIState.REVIEW
                         AppState.EXPORTING -> UIState.EXPORTING
                     }
-                    isProcessing = state == AppState.SWEEPING || state == AppState.PROCESSING || state == AppState.CALIBRATING || state == AppState.EXPORTING
+                    isProcessing = state == AppState.SWEEPING || state == AppState.PROCESSING || state == AppState.CALIBRATING
                     
                     if (state == AppState.REVIEW) {
                         irSampleCount = NativeEngine.trimEnd.value - NativeEngine.trimStart.value
@@ -108,43 +132,49 @@ class MainActivity : ComponentActivity() {
                 }
             }
             
-            LaunchedEffect(uiState, isProcessing) {
-                while (isProcessing) {
-                    delay(100)
-                    when (uiState) {
-                        UIState.CALIBRATING -> {
-                            sweepProgress = (sweepProgress + 0.02f).coerceAtMost(1f)
-                            spectrumData = generateSweepSpectrum(sweepProgress)
-                        }
-                        UIState.SWEEPING -> {
-                            NativeEngine.checkSweepComplete()
-                            sweepProgress = (sweepProgress + 0.02f).coerceAtMost(1f)
-                            spectrumData = generateSweepSpectrum(sweepProgress)
-                        }
-                        UIState.PROCESSING -> {
-                            sweepProgress = NativeEngine.getProcessingProgress()
-                            spectrumData = generateProcessingSpectrum(sweepProgress)
-                        }
-                        else -> {}
-                    }
-                }
-            }
-
             LaunchedEffect(uiState) {
                 when (uiState) {
-                    UIState.SWEEPING, UIState.PROCESSING -> {
+                    UIState.IDLE, UIState.EXPORTING, UIState.ERROR -> {
                         spectrumData = FloatArray(64) { 0f }
+                    }
+                    UIState.REVIEW -> {
+                        if (cachedIR.isEmpty()) {
+                            NativeEngine.getIRSpectrum(cachedIR)
+                        }
+                        spectrumData = cachedIR
                     }
                     else -> {}
                 }
             }
 
             LaunchedEffect(uiState) {
-                if (uiState == UIState.CALIBRATING || uiState == UIState.PROCESSING) {
-                    while (uiState == UIState.CALIBRATING || uiState == UIState.PROCESSING) {
-                        sweepProgress = NativeEngine.getProcessingProgress()
-                        delay(50)
+                if (uiState == UIState.REVIEW && cachedIR.isNotEmpty() && irFilename.isBlank()) {
+                    irFilename = "impulse_${System.currentTimeMillis()}.wav"
+                }
+            }
+
+            LaunchedEffect(uiState) {
+                while (isProcessing) {
+                    when (uiState) {
+                    UIState.CALIBRATING -> {
+                        inputLevel = NativeEngine.getInputLevel()
+                        sweepProgress = NativeEngine.getPlaybackProgress()
+                        NativeEngine.getCurrentSpectrum(spectrumData)
                     }
+                        UIState.SWEEPING -> {
+                            NativeEngine.checkSweepComplete()
+                            inputLevel = NativeEngine.getInputLevel()
+                            sweepProgress = NativeEngine.getPlaybackProgress()
+                            NativeEngine.getCurrentSpectrum(spectrumData)
+                        }
+                        UIState.PROCESSING -> {
+                            sweepProgress = NativeEngine.getProcessingProgress()
+                            inputLevel = 0f
+                            NativeEngine.getIRSpectrum(spectrumData)
+                        }
+                        else -> {}
+                    }
+                    delay(50)
                 }
             }
 
@@ -389,13 +419,90 @@ if (uiState == UIState.REVIEW && irSampleCount > 0) {
                                 modifier = Modifier.width(48.dp)
                             )
                         }
-                        
+                    }
+
+                    val showSaveUI = uiState != UIState.IDLE && uiState != UIState.EXPORTING && uiState != UIState.ERROR
+
+                    if (showSaveUI) {
+                        OutlinedTextField(
+                            value = irFilename,
+                            onValueChange = { irFilename = it },
+                            label = { Text("Filename") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFFFF4500),
+                                unfocusedBorderColor = Color(0xFF606060),
+                                focusedLabelColor = Color(0xFFFF4500)
+                            )
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = { folderPickerLauncher.launch(null) },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF424242)
+                                )
+                            ) {
+                                Text(
+                                    text = chosenFolderUri?.let {
+                                        DocumentFile.fromTreeUri(ctx, it)?.name ?: it.lastPathSegment
+                                    } ?: "Choose folder…",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    } else if (irFilename.isBlank()) {
+                        Text(
+                            text = "Available after capture",
+                            color = Color(0xFF505050),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    if (uiState == UIState.REVIEW && irSampleCount > 0) {
+                        val sanitizedFilename = irFilename.filter { c -> c.isLetterOrDigit() || c == '-' || c == '_' }.take(63).let { if (it.isBlank()) "impulse" else it } + ".wav"
+
                         Button(
                             onClick = {
-                                val fileName = "impulse_${System.currentTimeMillis()}.wav"
-                                val exportPath = "Music/ImpulseResponses/$fileName"
-                                val success = NativeEngine.export(exportPath)
-                                showExportSuccess = if (success) "Saved: $fileName" else "Export failed"
+                                val cacheDir = ctx.cacheDir
+                                val tempFile = java.io.File(cacheDir, sanitizedFilename)
+                                val tempPath = tempFile.absolutePath
+                                val exportSuccess = NativeEngine.export(tempPath)
+
+                                if (!exportSuccess) {
+                                    showExportSuccess = "Export failed"
+                                    return@Button
+                                }
+
+                                if (chosenFolderUri != null) {
+                                    val tree = DocumentFile.fromTreeUri(ctx, chosenFolderUri!!)
+                                    val existing = tree?.findFile(sanitizedFilename)
+                                    existing?.delete()
+                                    val newFile = tree?.createFile("audio/wav", sanitizedFilename)
+                                    if (newFile != null) {
+                                        ctx.contentResolver.openOutputStream(newFile.uri)?.use { out ->
+                                            tempFile.inputStream().use { input -> input.copyTo(out) }
+                                        }
+                                        tempFile.delete()
+                                        val folderName = DocumentFile.fromTreeUri(ctx, chosenFolderUri!!)?.name ?: chosenFolderUri!!.lastPathSegment
+                                        showExportSuccess = "Saved: $folderName/$sanitizedFilename"
+                                    } else {
+                                        showExportSuccess = "Failed to create file in folder"
+                                    }
+                                } else {
+                                    showExportSuccess = "Saved: ${tempFile.absolutePath}"
+                                }
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -523,28 +630,4 @@ fun SpectrumVisualizer(
             )
         }
     }
-}
-
-fun generateSweepSpectrum(progress: Float): FloatArray {
-    val data = FloatArray(64)
-    val freq = 20f * Math.pow(1000.0, progress.toDouble()).toFloat()
-    
-    for (i in data.indices) {
-        val binFreq = 20f * Math.pow(1000.0, (i.toFloat() / 63).toDouble()).toFloat()
-        val diff = kotlin.math.abs(binFreq - freq)
-        val response = if (diff < freq * 0.3f) 0.8f + kotlin.random.Random.nextFloat() * 0.2f else 0.1f + kotlin.random.Random.nextFloat() * 0.1f
-        data[i] = response
-    }
-    return data
-}
-
-fun generateProcessingSpectrum(progress: Float): FloatArray {
-    val data = FloatArray(64)
-    val peakPos = (progress * 63).toInt()
-    
-    for (i in data.indices) {
-        val dist = kotlin.math.abs(i - peakPos)
-        data[i] = if (dist < 3) (1f - dist / 3f) * progress else 0f
-    }
-    return data
 }

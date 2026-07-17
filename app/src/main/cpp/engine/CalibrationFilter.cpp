@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <vector>
+#include <complex>
 #include <fstream>
 #include <sstream>
 #include <android/log.h>
@@ -18,29 +19,105 @@
 
 namespace impulser {
 
-template<typename T, size_t Alignment>
-struct AlignedAllocator {
-    using value_type = T;
-
-    T* allocate(size_t n) {
-        if (n == 0) return nullptr;
-        void* ptr = nullptr;
-        if (posix_memalign(&ptr, Alignment, n * sizeof(T)) != 0) {
-            throw std::bad_alloc();
-        }
-        return static_cast<T*>(ptr);
-    }
-
-    void deallocate(T* ptr, size_t) noexcept {
-        std::free(ptr);
-    }
-};
-
-using AlignedFloat = std::vector<float, AlignedAllocator<float, 64>>;
-
 } // namespace impulser
 
+namespace {
+
+void fft_inplace(std::vector<std::complex<float>>& a) {
+    const int N = static_cast<int>(a.size());
+    if (N <= 1) return;
+
+    int j = 0;
+    for (int i = 0; i < N - 1; ++i) {
+        if (i < j) {
+            std::swap(a[i], a[j]);
+        }
+        int k = N;
+        do {
+            k >>= 1;
+        } while (k <= j);
+        j = j - k + (k > j ? k : 0);
+    }
+
+    for (int len = 2; len <= N; len <<= 1) {
+        float angle = -2.0f * static_cast<float>(M_PI) / len;
+        std::complex<float> wlen(std::cos(angle), std::sin(angle));
+        for (int i = 0; i < N; i += len) {
+            std::complex<float> w(1.0f, 0.0f);
+            for (int jj = 0; jj < len / 2; ++jj) {
+                std::complex<float> u = a[i + jj];
+                std::complex<float> t = w * a[i + jj + len / 2];
+                a[i + jj] = u + t;
+                a[i + jj + len / 2] = u - t;
+                w *= wlen;
+            }
+        }
+    }
+}
+
+void ifft_inplace(std::vector<std::complex<float>>& a) {
+    const int N = static_cast<int>(a.size());
+    if (N <= 1) return;
+
+    for (auto& x : a) {
+        x = std::conj(x);
+    }
+
+    fft_inplace(a);
+
+    for (auto& x : a) {
+        x = std::conj(x) / static_cast<float>(N);
+    }
+}
+
+} // anonymous namespace
+
 namespace impulser {
+
+void CalibrationFilter::computeMagnitudeSpectrum(const float* window, int windowSize,
+                                                 float* outBins, int nBins) {
+    if (window == nullptr || windowSize <= 0 || outBins == nullptr || nBins <= 0) {
+        for (int i = 0; i < nBins; i++) outBins[i] = 0.0f;
+        return;
+    }
+
+    // Pad to next power of 2
+    int N = 1;
+    while (N < windowSize) N <<= 1;
+    std::vector<std::complex<float>> fftBuffer(N);
+
+    // Copy window to complex buffer
+    for (int i = 0; i < windowSize; i++) {
+        fftBuffer[i] = std::complex<float>(window[i], 0.0f);
+    }
+    for (int i = windowSize; i < N; i++) {
+        fftBuffer[i] = std::complex<float>(0.0f, 0.0f);
+    }
+
+    // Run FFT (use the local fft_inplace from anonymous namespace)
+    fft_inplace(fftBuffer);
+
+    // Compute magnitude and convert to log scale [0, 1]
+    // Find max magnitude for normalization
+    float maxMag = 1e-6f;
+    for (int i = 0; i < N / 2; i++) {
+        float mag = std::abs(fftBuffer[i]);
+        if (mag > maxMag) maxMag = mag;
+    }
+
+    // Log-magnitude: log10(max(mag, epsilon)) normalized
+    const float epsilon = 1e-6f;
+    const float log10_epsilon = -6.0f; // log10(1e-6)
+
+    for (int i = 0; i < nBins; i++) {
+        float mag = std::abs(fftBuffer[i]);
+        float logMag = std::log10(std::max(mag, epsilon));
+        // Normalize to [0, 1] range
+        outBins[i] = (logMag - log10_epsilon) / (-log10_epsilon);
+        if (outBins[i] < 0.0f) outBins[i] = 0.0f;
+        if (outBins[i] > 1.0f) outBins[i] = 1.0f;
+    }
+}
 
 CalibrationFilter::CalibrationFilter(float f1, float f2, float duration, int sampleRate)
     : mF1(f1)
@@ -56,9 +133,7 @@ CalibrationFilter::CalibrationFilter(float f1, float f2, float duration, int sam
 }
 
 CalibrationFilter::~CalibrationFilter() {
-    if (mFFTSetup) {
-        pffft_destroy_setup(mFFTSetup);
-    }
+    // No external resources to clean up
 }
 
 bool CalibrationFilter::runCalibration(OboeEngine& oboeEngine) {
@@ -228,109 +303,66 @@ std::string CalibrationFilter::getDeviceId() {
 
 bool CalibrationFilter::computeTransferFunction(const float* recorded, int recLen,
                                                   const float* reference, int refLen) {
-    // Calculate FFT size
     int convLen = recLen + refLen - 1;
     int N_fft = nextPowerOf2(convLen);
-    
-    // Ensure N_fft is valid for PFFFT
-    while (N_fft % 32 != 0) {
-        N_fft *= 2;
+
+    std::vector<std::complex<float>> Y(N_fft);
+    std::vector<std::complex<float>> X(N_fft);
+
+    for (int i = 0; i < recLen; ++i) {
+        Y[i] = recorded[i];
     }
-    
-    // Create FFT setup
-    if (mFFTSetup) {
-        pffft_destroy_setup(mFFTSetup);
+    for (int i = recLen; i < N_fft; ++i) {
+        Y[i] = 0.0f;
     }
-    mFFTSetup = pffft_new_setup(N_fft, PFFFT_REAL);
-    
-    if (!mFFTSetup) {
-        LOGE("Failed to create FFT setup");
-        return false;
+
+    for (int i = 0; i < refLen; ++i) {
+        X[i] = reference[i];
     }
-    
-    // Allocate buffers (64-byte aligned for pffft SIMD)
-    AlignedFloat y_padded(N_fft, 0.0f);
-    AlignedFloat x_padded(N_fft, 0.0f);
-    AlignedFloat Y(N_fft, 0.0f);
-    AlignedFloat X(N_fft, 0.0f);
-    AlignedFloat H_dev(N_fft, 0.0f);
-    AlignedFloat work(N_fft, 0.0f);
-    
-    // Copy signals
-    std::memcpy(y_padded.data(), recorded, recLen * sizeof(float));
-    std::memcpy(x_padded.data(), reference, refLen * sizeof(float));
-    
-    // FFT of recorded signal
-    pffft_transform_ordered(mFFTSetup, y_padded.data(), Y.data(), work.data(), PFFFT_FORWARD);
-    
-    // FFT of reference signal
-    pffft_transform_ordered(mFFTSetup, x_padded.data(), X.data(), work.data(), PFFFT_FORWARD);
-    
-    // Compute transfer function: H_dev[k] = Y[k] / X[k]
-    // With Tikhonov regularization to avoid division by near-zero
-    const float epsilon = 1e-3f; // -60 dBFS noise floor protection
-    
-    for (int k = 0; k < N_fft / 2; ++k) {
-        float X_real = X[2*k];
-        float X_imag = X[2*k+1];
-        float Y_real = Y[2*k];
-        float Y_imag = Y[2*k+1];
-        
-        // |X[k]|^2
-        float X_mag2 = X_real * X_real + X_imag * X_imag;
-        
-        // Regularized division: H = conj(X) * Y / (|X|^2 + epsilon)
+    for (int i = refLen; i < N_fft; ++i) {
+        X[i] = 0.0f;
+    }
+
+    fft_inplace(Y);
+    fft_inplace(X);
+
+    const float epsilon = 1e-3f;
+
+    std::vector<std::complex<float>> H_dev(N_fft);
+    for (int k = 0; k < N_fft; ++k) {
+        float X_mag2 = std::norm(X[k]);
         float denom = X_mag2 + epsilon;
-        H_dev[2*k] = (X_real * Y_real + X_imag * Y_imag) / denom;
-        H_dev[2*k+1] = (X_real * Y_imag - X_imag * Y_real) / denom;
+        H_dev[k] = std::conj(X[k]) * Y[k] / denom;
     }
-    
-    // Compute inverse filter
+
     computeInverseFilter(H_dev.data(), N_fft);
-    
+
     return true;
 }
 
-void CalibrationFilter::computeInverseFilter(const float* H_dev, int N) {
-    // Compute Tikhonov-regularized inverse filter
-    // H_corr[k] = conj(H_dev[k]) / (|H_dev[k]|^2 + epsilon)
-    
-    std::vector<float> H_corr(N, 0.0f);
+void CalibrationFilter::computeInverseFilter(const std::complex<float>* H_dev, int N) {
+    std::vector<std::complex<float>> H_corr(N);
     const float epsilon = 1e-3f;
-    
-    for (int k = 0; k < N / 2; ++k) {
-        float H_real = H_dev[2*k];
-        float H_imag = H_dev[2*k+1];
-        
-        // |H_dev[k]|^2
-        float H_mag2 = H_real * H_real + H_imag * H_imag;
-        
-        // Regularized inverse: H_corr = conj(H_dev) / (|H_dev|^2 + epsilon)
+
+    for (int k = 0; k < N; ++k) {
+        float H_mag2 = std::norm(H_dev[k]);
         float denom = H_mag2 + epsilon;
-        H_corr[2*k] = H_real / denom;
-        H_corr[2*k+1] = -H_imag / denom; // Conjugate
+        H_corr[k] = std::conj(H_dev[k]) / denom;
     }
-    
-    // Inverse FFT to get time-domain filter
-    std::vector<float> h_corr_time(N, 0.0f);
-    std::vector<float> work(N, 0.0f);
-    
-    pffft_transform_ordered(mFFTSetup, H_corr.data(), h_corr_time.data(), work.data(), PFFFT_BACKWARD);
-    
-    // Window to kFilterLength taps
+
+    ifft_inplace(H_corr);
+
     int halfFilter = kFilterLength / 2;
     mFilter.resize(kFilterLength, 0.0f);
-    
-    // Extract the center portion of the filter
+
     int startIdx = N / 2 - halfFilter;
     for (int i = 0; i < kFilterLength; ++i) {
         int idx = startIdx + i;
         if (idx >= 0 && idx < N) {
-            mFilter[i] = h_corr_time[idx];
+            mFilter[i] = H_corr[idx].real();
         }
     }
-    
-    // Apply Hann window to smooth the filter
+
     for (int i = 0; i < kFilterLength; ++i) {
         float w = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / (kFilterLength - 1)));
         mFilter[i] *= w;

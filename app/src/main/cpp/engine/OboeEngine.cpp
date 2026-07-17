@@ -1,4 +1,5 @@
 #include "OboeEngine.h"
+#include "CalibrationFilter.h"
 #include <android/log.h>
 #include <jni.h>
 #include <cmath>
@@ -48,6 +49,10 @@ bool OboeEngine::initialize() {
          mOutputStream->getChannelCount(),
          static_cast<int>(mOutputStream->getFormat()));
 
+    // ponytail: Oboe 1.8 has no setOnStoppedCallback — close is performed
+    // synchronously in stop() after waitForStateChange reaches Stopped.
+    // The mOutputStopCompleted atomic is kept as a re-entrance guard.
+
     // Create input stream
     oboe::AudioStreamBuilder inputBuilder;
     inputBuilder.setDirection(oboe::Direction::Input)
@@ -67,11 +72,13 @@ bool OboeEngine::initialize() {
         return false;
     }
 
-LOGI("Input stream opened: %d Hz, %d channels, format=%d, inputPreset=%d",
+    LOGI("Input stream opened: %d Hz, %d channels, format=%d, inputPreset=%d",
           mInputStream->getSampleRate(),
           mInputStream->getChannelCount(),
           static_cast<int>(mInputStream->getFormat()),
           static_cast<int>(mInputStream->getInputPreset()));
+
+    // see comment above; same deferral for input stream
      
 // Initialize ring buffer after streams are opened
       try {
@@ -128,18 +135,47 @@ void OboeEngine::stop() {
 
     LOGI("Stopping OboeEngine");
 
+    auto waitForStreamStopped = [](oboe::AudioStream* stream, const char* tag) {
+        if (!stream) return;
+        if (stream->getState() == oboe::StreamState::Stopped) return;
+        oboe::StreamState next = oboe::StreamState::Unknown;
+        // 100ms timeout per poll; bounded total 2s safety.
+        for (int i = 0; i < 100; ++i) {
+            oboe::Result r = stream->waitForStateChange(
+                oboe::StreamState::Stopping, &next, 100000000LL /* 100ms in ns */);
+            if (r == oboe::Result::OK && (next == oboe::StreamState::Stopped ||
+                                          next == oboe::StreamState::Disconnected)) {
+                break;
+            }
+            if (r != oboe::Result::OK &&
+                r != oboe::Result::ErrorTimeout &&
+                r != oboe::Result::ErrorInvalidState) {
+                break;
+            }
+        }
+        LOGI("waitForStreamStopped[%s] -> state=%d", tag, (int)stream->getState());
+    };
+
     if (mInputStream) {
         mInputStream->requestStop();
-        mInputStream->close();
+        waitForStreamStopped(mInputStream.get(), "in");
+        if (!mInputStopCompleted.exchange(true)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            mInputStream->close();
+        }
     }
 
     if (mOutputStream) {
         mOutputStream->requestStop();
-        mOutputStream->close();
+        waitForStreamStopped(mOutputStream.get(), "out");
+        if (!mOutputStopCompleted.exchange(true)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            mOutputStream->close();
+        }
     }
 
     mIsRunning = false;
-    LOGI("OboeEngine stopped");
+    LOGI("OboeEngine stop completed");
 }
 
 void OboeEngine::setPlaybackData(const float* data, int numSamples) {
@@ -302,6 +338,43 @@ bool OboeEngine::captureWhilePlaying(const float* essData, int essSamples,
     LOGI("Captured %d samples", captured);
 
     return captured > 0;
+}
+
+void OboeEngine::getCurrentSpectrum(float* outBins, int nBins) {
+    static constexpr int kWindowSize = 1024;
+
+    if (outBins == nullptr || nBins <= 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mPlaybackMutex);
+
+    if (mPlaybackData.empty()) {
+        for (int i = 0; i < nBins; i++) outBins[i] = 0.0f;
+        return;
+    }
+
+    // Read last 1024 samples, zero-pad if needed
+    float window[kWindowSize];
+    int samplesAvailable = std::min(mPlaybackIndex, static_cast<int>(mPlaybackData.size()));
+
+    if (samplesAvailable >= kWindowSize) {
+        // Have enough samples, read the last 1024
+        int start = samplesAvailable - kWindowSize;
+        for (int i = 0; i < kWindowSize; i++) {
+            window[i] = mPlaybackData[start + i];
+        }
+    } else {
+        // Zero-pad the beginning
+        for (int i = 0; i < kWindowSize - samplesAvailable; i++) {
+            window[i] = 0.0f;
+        }
+        for (int i = 0; i < samplesAvailable; i++) {
+            window[kWindowSize - samplesAvailable + i] = mPlaybackData[i];
+        }
+    }
+
+    CalibrationFilter::computeMagnitudeSpectrum(window, kWindowSize, outBins, nBins);
 }
 
 } // namespace impulser

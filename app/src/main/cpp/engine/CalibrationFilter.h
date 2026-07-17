@@ -3,7 +3,7 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include "pffft.h"
+#include <complex>
 
 namespace impulser {
 
@@ -91,6 +91,18 @@ public:
      */
     static std::string getDeviceId();
 
+    /**
+     * Compute magnitude spectrum from audio window.
+     * Reads window of samples, runs FFT, returns log-magnitude of first nBins.
+     * 
+     * @param window Input audio samples
+     * @param windowSize Number of samples in window (should be power of 2)
+     * @param outBins Output magnitude bins (size nBins)
+     * @param nBins Number of output bins
+     */
+    static void computeMagnitudeSpectrum(const float* window, int windowSize,
+                                        float* outBins, int nBins);
+
 private:
     /**
      * Compute the device transfer function from recorded calibration signal.
@@ -110,7 +122,7 @@ private:
      * @param H_dev Device transfer function (complex spectrum)
      * @param N FFT size
      */
-    void computeInverseFilter(const float* H_dev, int N);
+    void computeInverseFilter(const std::complex<float>* H_dev, int N);
 
     /**
      * Find the next power of 2 >= n.
@@ -132,9 +144,6 @@ private:
     
     // State
     bool mIsCalibrated = false;
-    
-    // PFFFT setup
-    PFFFT_Setup* mFFTSetup = nullptr;
 };
 
 } // namespace impulser

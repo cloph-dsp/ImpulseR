@@ -5,37 +5,77 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <vector>
+#include <complex>
 #include <android/log.h>
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Deconvolver", __VA_ARGS__)
 
-namespace impulser {
-
-template<typename T, size_t Alignment>
-struct AlignedAllocator {
-    using value_type = T;
-
-    T* allocate(size_t n) {
-        if (n == 0) return nullptr;
-        void* ptr = nullptr;
-        if (posix_memalign(&ptr, Alignment, n * sizeof(T)) != 0) {
-            throw std::bad_alloc();
-        }
-        return static_cast<T*>(ptr);
-    }
-
-    void deallocate(T* ptr, size_t) noexcept {
-        std::free(ptr);
-    }
-};
-
-using AlignedFloat = std::vector<float, AlignedAllocator<float, 64>>;
-
-} // namespace impulser
-
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+namespace {
+
+/**
+ * Cooley-Tukey radix-2 in-place FFT.
+ * N must be a power of 2.
+ */
+void fft_inplace(std::vector<std::complex<float>>& a) {
+    const int N = static_cast<int>(a.size());
+    if (N <= 1) return;
+
+    // Bit-reversal permutation
+    int j = 0;
+    for (int i = 0; i < N - 1; ++i) {
+        if (i < j) {
+            std::swap(a[i], a[j]);
+        }
+        int k = N;
+        do {
+            k >>= 1;
+        } while (k <= j);
+        j = j - k + (k > j ? k : 0);
+    }
+
+    // Cooley-Tukey iterative FFT
+    for (int len = 2; len <= N; len <<= 1) {
+        float angle = -2.0f * static_cast<float>(M_PI) / len;
+        std::complex<float> wlen(std::cos(angle), std::sin(angle));
+        for (int i = 0; i < N; i += len) {
+            std::complex<float> w(1.0f, 0.0f);
+            for (int jj = 0; jj < len / 2; ++jj) {
+                std::complex<float> u = a[i + jj];
+                std::complex<float> t = w * a[i + jj + len / 2];
+                a[i + jj] = u + t;
+                a[i + jj + len / 2] = u - t;
+                w *= wlen;
+            }
+        }
+    }
+}
+
+/**
+ * In-place inverse FFT: conjugate, fft, conjugate, divide by N.
+ */
+void ifft_inplace(std::vector<std::complex<float>>& a) {
+    const int N = static_cast<int>(a.size());
+    if (N <= 1) return;
+
+    // Conjugate
+    for (auto& x : a) {
+        x = std::conj(x);
+    }
+
+    // Forward FFT
+    fft_inplace(a);
+
+    // Conjugate and divide by N
+    for (auto& x : a) {
+        x = std::conj(x) / static_cast<float>(N);
+    }
+}
+
+} // anonymous namespace
 
 namespace impulser {
 
@@ -64,9 +104,7 @@ Deconvolver::Deconvolver(float f1, float f2, float duration, int sampleRate)
 }
 
 Deconvolver::~Deconvolver() {
-    if (mFFTSetup) {
-        pffft_destroy_setup(mFFTSetup);
-    }
+    // No external resources to clean up
 }
 
 bool Deconvolver::deconvolve(const float* recorded, int recLen, float** irOut, int* irLen) {
@@ -83,82 +121,59 @@ bool Deconvolver::deconvolve(const float* recorded, int recLen, float** irOut, i
     int convLen = recLen + inverseFilterLen - 1;
     int N_fft = nextPowerOf2(convLen);
 
-    // Ensure N_fft is valid for PFFFT (multiple of 32 for real transforms)
-    while (N_fft % 32 != 0) {
-        N_fft *= 2;
-    }
+    // Allocate complex buffers for frequency-domain processing
+    std::vector<std::complex<float>> Y(N_fft);
+    std::vector<std::complex<float>> H_inv(N_fft);
+    std::vector<std::complex<float>> IR_freq(N_fft);
+    std::vector<float> ir_full(N_fft);
 
-    // Create or recreate FFT setup if needed
-    if (!mFFTSetup || mCurrentFFTSize != N_fft) {
-        if (mFFTSetup) {
-            pffft_destroy_setup(mFFTSetup);
-        }
-        mFFTSetup = pffft_new_setup(N_fft, PFFFT_REAL);
-        mCurrentFFTSize = N_fft;
-        
-        if (!mFFTSetup) {
-            return false;
-        }
-    }
-
-    // Allocate buffers (64-byte aligned for pffft SIMD).
-    // All buffers hold N floats: this pffft stub uses real-packed spectrum layout,
-    // so Y/H_inv/IR_freq are not complex-packed like the real PFFFT library.
-    AlignedFloat y_padded(N_fft, 0.0f);
-    AlignedFloat h_inv_padded(N_fft, 0.0f);
-    AlignedFloat Y(N_fft, 0.0f);
-    AlignedFloat H_inv(N_fft, 0.0f);
-    AlignedFloat IR_freq(N_fft, 0.0f);
-    AlignedFloat ir_full(N_fft, 0.0f);
-    AlignedFloat work(N_fft, 0.0f);
-
-    // Copy recorded signal with latency compensation
+    // Copy recorded signal with latency compensation into complex buffer
     int delay = mRoundTripDelaySamples;
     if (delay > 0 && delay < recLen) {
-        std::memcpy(y_padded.data(), recorded + delay, (recLen - delay) * sizeof(float));
+        for (int i = 0; i < recLen - delay; ++i) {
+            Y[i] = recorded[delay + i];
+        }
+        for (int i = recLen - delay; i < N_fft; ++i) {
+            Y[i] = 0.0f;
+        }
     } else {
-        std::memcpy(y_padded.data(), recorded, recLen * sizeof(float));
+        for (int i = 0; i < recLen; ++i) {
+            Y[i] = recorded[i];
+        }
+        for (int i = recLen; i < N_fft; ++i) {
+            Y[i] = 0.0f;
+        }
     }
 
-    // Copy inverse filter
-    std::memcpy(h_inv_padded.data(), inverseFilter.data(), inverseFilterLen * sizeof(float));
-
-    // Apply calibration filter if available
-    if (mHasCalibrationFilter && !mCalibrationFilter.empty()) {
-        // Apply calibration in time domain (convolution)
-        // For simplicity, we'll apply it in frequency domain after FFT
+    // Copy inverse filter into complex buffer
+    for (int i = 0; i < inverseFilterLen; ++i) {
+        H_inv[i] = inverseFilter[i];
+    }
+    for (int i = inverseFilterLen; i < N_fft; ++i) {
+        H_inv[i] = 0.0f;
     }
 
-    // FFT of recorded signal
-    pffft_transform_ordered(mFFTSetup, y_padded.data(), Y.data(), work.data(), PFFFT_FORWARD);
-
-    // FFT of inverse filter
-    pffft_transform_ordered(mFFTSetup, h_inv_padded.data(), H_inv.data(), work.data(), PFFFT_FORWARD);
+    // Forward FFT
+    fft_inplace(Y);
+    fft_inplace(H_inv);
 
     // Apply calibration filter in frequency domain
     if (mHasCalibrationFilter && !mCalibrationFilter.empty()) {
         applyCalibrationFilter(Y.data(), N_fft);
     }
 
-    // Real-packed spectrum layout (this pffft stub):
-    //   Y[0 .. N/2]   = real part of bins 0..N/2
-    //   Y[N/2+1 .. N-1] = imag part of bins N/2-1 .. 1 (reverse order)
-    // Bin 0 = DC (imag=0), bin N/2 = Nyquist (imag=0).
-    // Do complex multiplication bin-by-bin on this packed layout.
-    const int half = N_fft / 2;
-    IR_freq[0] = Y[0] * H_inv[0];
-    IR_freq[half] = Y[half] * H_inv[half];
-    for (int k = 1; k < half; ++k) {
-        float yR = Y[k];
-        float yI = Y[N_fft - k];
-        float hR = H_inv[k];
-        float hI = H_inv[N_fft - k];
-        IR_freq[k] = yR * hR - yI * hI;
-        IR_freq[N_fft - k] = yR * hI + yI * hR;
+    // Point-wise multiply: IR_freq = Y * H_inv
+    for (int k = 0; k < N_fft; ++k) {
+        IR_freq[k] = Y[k] * H_inv[k];
     }
 
     // Inverse FFT
-    pffft_transform_ordered(mFFTSetup, IR_freq.data(), ir_full.data(), work.data(), PFFFT_BACKWARD);
+    ifft_inplace(IR_freq);
+
+    // Extract real part to ir_full buffer
+    for (int i = 0; i < N_fft; ++i) {
+        ir_full[i] = IR_freq[i].real();
+    }
 
     // Isolate linear IR from harmonic images
     isolateLinearIR(ir_full.data(), N_fft, irOut, irLen);
@@ -209,7 +224,7 @@ int Deconvolver::nextPowerOf2(int n) const {
     return power;
 }
 
-void Deconvolver::applyCalibrationFilter(float* spectrum, int N) {
+void Deconvolver::applyCalibrationFilter(std::complex<float>* spectrum, int N) {
     // Apply calibration filter in frequency domain
     // This is a simplified version - in production, we would:
     // 1. FFT the calibration filter
