@@ -264,16 +264,6 @@ object NativeEngine {
         nativeUpdateWaveform(data, trimStart, trimEnd)
     }
     
-    fun saveCalibration(key: String, value: String): Boolean {
-        if (nativeHandle == 0L) return false
-        return nativeSaveCalibration(key, value)
-    }
-    
-fun loadCalibration(key: String): String {
-        if (nativeHandle == 0L) return ""
-        return nativeLoadCalibration(key)
-    }
-    
     fun checkSweepComplete(): Boolean {
         if (nativeHandle == 0L) return false
         val completed = nativeCheckSweepComplete()
@@ -307,8 +297,6 @@ fun loadCalibration(key: String): String {
     private external fun nativeSetWaveformSurface(surfacePtr: Long)
     private external fun nativeUpdateSpectrogram(data: FloatArray)
     private external fun nativeUpdateWaveform(data: FloatArray, trimStart: Int, trimEnd: Int)
-    private external fun nativeSaveCalibration(key: String, value: String): Boolean
-    private external fun nativeLoadCalibration(key: String): String
     private external fun nativeCheckSweepComplete(): Boolean
     private external fun nativeRunCalibration(): Boolean
 }

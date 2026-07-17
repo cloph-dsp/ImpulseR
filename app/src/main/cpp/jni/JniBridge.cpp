@@ -110,12 +110,23 @@ Java_com_impulser_engine_NativeEngine_nativeCreate(JNIEnv* env, jobject thiz) {
     // Initialize ESS generator
     gESSGenerator = std::make_unique<ESSGenerator>(20.0f, 20000.0f, 7.0f, gSampleRate);
 
-    // Initialize calibration filter
+    // Initialize calibration filter, deconvolver, and IR processor
     gCalibrationFilter = std::make_unique<CalibrationFilter>(20.0f, 20000.0f, 7.0f, gSampleRate);
-
-    // Initialize deconvolver and IR processor
     gDeconvolver = std::make_unique<Deconvolver>(20.0f, 20000.0f, 7.0f, gSampleRate);
     gIRProcessor = std::make_unique<IRProcessor>(gSampleRate);
+
+    // Auto-load persisted calibration for this device and push to deconvolver
+    {
+        std::string deviceId = gCalibrationFilter->getDeviceId();
+        if (gCalibrationFilter->load(deviceId)) {
+            const float* filter = gCalibrationFilter->getFilter();
+            int filterLen = gCalibrationFilter->getFilterLength();
+            if (filterLen > 0) {
+                gDeconvolver->setCalibrationFilter(filter, filterLen);
+                LOGI("Auto-loaded calibration for device %s (%d taps)", deviceId.c_str(), filterLen);
+            }
+        }
+    }
     
     // Wire the capture callback
     gOboeEngine->setCallback(&gCaptureCallback);
@@ -593,40 +604,6 @@ Java_com_impulser_engine_NativeEngine_nativeUpdateWaveform(JNIEnv* env, jobject 
         gWaveformRenderer->updateData(dataPtr, len, trimStart, trimEnd);
         env->ReleaseFloatArrayElements(data, dataPtr, JNI_ABORT);
     }
-}
-
-// SharedPreferences JNI wrapper for calibration storage
-static std::string gCalibrationData;
-
-JNIEXPORT jboolean JNICALL
-Java_com_impulser_engine_NativeEngine_saveCalibration(JNIEnv* env, jobject thiz, jstring key, jstring value) {
-    const char* keyStr = env->GetStringUTFChars(key, nullptr);
-    const char* valueStr = env->GetStringUTFChars(value, nullptr);
-    
-    if (keyStr == nullptr || valueStr == nullptr) {
-        return JNI_FALSE;
-    }
-    
-    gCalibrationData = std::string(valueStr);
-    LOGI("Saved calibration for key: %s", keyStr);
-    
-    env->ReleaseStringUTFChars(key, keyStr);
-    env->ReleaseStringUTFChars(value, valueStr);
-    
-    return JNI_TRUE;
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_impulser_engine_NativeEngine_loadCalibration(JNIEnv* env, jobject thiz, jstring key) {
-    const char* keyStr = env->GetStringUTFChars(key, nullptr);
-    if (keyStr == nullptr) {
-        return env->NewStringUTF("");
-    }
-    
-    env->ReleaseStringUTFChars(key, keyStr);
-    
-    // Return stored calibration or empty string
-    return env->NewStringUTF(gCalibrationData.c_str());
 }
 
 JNIEXPORT jboolean JNICALL
