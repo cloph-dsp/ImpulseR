@@ -7,6 +7,9 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <thread>
+#include <future>
+#include <chrono>
 #include "OboeEngine.h"
 #include "ESSGenerator.h"
 #include "Deconvolver.h"
@@ -66,6 +69,14 @@ static int gTrimStart = 0;
 static int gTrimEnd = 0;
 static int gSampleRate = kDefaultSampleRate;
 static int gIrLength = 0;
+
+// Fix A: calibration threading
+static std::atomic<bool> gCalibrationRunning{false};
+static std::atomic<bool> gCalibrationCancel{false};
+
+// Fix B: processing threading
+static std::thread gProcessingThread;
+static std::atomic<bool> gProcessingBusy{false};
 
 class CaptureCallback : public IRCaptureCallback {
 public:
@@ -274,7 +285,7 @@ Java_com_impulser_engine_NativeEngine_nativeStartSweep(JNIEnv* env, jobject thiz
     return JNI_TRUE;
 }
 
-static bool finishSweepProcessing() {
+static bool processSweepDataImpl() {
     std::lock_guard<std::mutex> processLock(gProcessMutex);
 
     if (gAppState.load() != PROCESSING) {
@@ -348,6 +359,10 @@ static bool finishSweepProcessing() {
     }
 }
 
+static bool finishSweepProcessing() {
+    return processSweepDataImpl();
+}
+
 JNIEXPORT void JNICALL
 Java_com_impulser_engine_NativeEngine_nativeStopSweep(JNIEnv* env, jobject thiz) {
     LOGI("Stopping sweep");
@@ -359,10 +374,18 @@ Java_com_impulser_engine_NativeEngine_nativeStopSweep(JNIEnv* env, jobject thiz)
         gOboeEngine->stop();
     }
 
+    if (gProcessingBusy.load()) {
+        LOGI("Processing already running, ignoring request");
+        return;
+    }
+    gProcessingBusy = true;
+    if (gProcessingThread.joinable()) gProcessingThread.join();
     gAppState.store(PROCESSING);
     gProcessingProgress.store(0.0f);
-
-    finishSweepProcessing();
+    gProcessingThread = std::thread([&]() {
+        processSweepDataImpl();
+        gProcessingBusy = false;
+    });
 }
 
 JNIEXPORT jboolean JNICALL
@@ -617,10 +640,18 @@ Java_com_impulser_engine_NativeEngine_nativeCheckSweepComplete(JNIEnv* env, jobj
         gSweepRunning.store(false);
         gOboeEngine->stop();
 
+        if (gProcessingBusy.load()) {
+            LOGI("Processing already running");
+            return JNI_TRUE;
+        }
         gAppState.store(PROCESSING);
         gProcessingProgress.store(0.0f);
-
-        finishSweepProcessing();
+        gProcessingBusy = true;
+        if (gProcessingThread.joinable()) gProcessingThread.join();
+        gProcessingThread = std::thread([&]() {
+            processSweepDataImpl();
+            gProcessingBusy = false;
+        });
         return JNI_TRUE;
     }
 
@@ -633,17 +664,45 @@ Java_com_impulser_engine_NativeEngine_nativeRunCalibration(JNIEnv* env, jobject 
         LOGE("Cannot calibrate: not in IDLE state");
         return JNI_FALSE;
     }
-    
+
     if (!gCalibrationFilter || !gOboeEngine) {
         LOGE("Calibration filter or Oboe engine not initialized");
         return JNI_FALSE;
     }
-    
-    LOGI("Running calibration...");
+
+    LOGI("Running calibration (multi-shot)...");
     gAppState.store(CALIBRATING);
-    
-    bool success = gCalibrationFilter->runCalibration(*gOboeEngine);
-    
+    gCalibrationCancel = false;
+
+    std::promise<bool> donePromise;
+    auto doneFuture = donePromise.get_future();
+    std::thread worker([&]() {
+        auto captures = gCalibrationFilter->captureMultiple(3, gSampleRate);
+        if (captures.empty()) {
+            donePromise.set_value(false);
+            return;
+        }
+        auto mFilter = gCalibrationFilter->buildInverseFromCaptures(captures, gSampleRate);
+        if (mFilter.empty()) {
+            donePromise.set_value(false);
+            return;
+        }
+        gCalibrationFilter->setFilter(mFilter);
+        std::string deviceId = CalibrationFilter::getDeviceId();
+        gCalibrationFilter->save(deviceId);
+        donePromise.set_value(true);
+    });
+
+    auto status = doneFuture.wait_for(std::chrono::seconds(25));
+    if (status == std::future_status::timeout) {
+        gCalibrationCancel = true;
+        LOGW("Multi-shot calibration timed out");
+        worker.detach();
+        return JNI_FALSE;
+    }
+    worker.join();
+
+    bool success = doneFuture.get();
     if (success) {
         gAppState.store(IDLE);
         LOGI("Calibration completed successfully");
@@ -651,8 +710,27 @@ Java_com_impulser_engine_NativeEngine_nativeRunCalibration(JNIEnv* env, jobject 
         gAppState.store(IDLE);
         LOGE("Calibration failed");
     }
-    
+
     return success ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_impulser_engine_NativeEngine_nativeFinishSweepProcessing(JNIEnv* env, jobject thiz) {
+    if (gProcessingBusy.load()) {
+        LOGW("Processing already running, ignoring request");
+        return;
+    }
+    gProcessingBusy = true;
+    if (gProcessingThread.joinable()) gProcessingThread.join();
+    gProcessingThread = std::thread([&]() {
+        processSweepDataImpl();
+        gProcessingBusy = false;
+    });
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_impulser_engine_NativeEngine_isProcessingBusy(JNIEnv* env, jobject thiz) {
+    return gProcessingBusy.load() ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

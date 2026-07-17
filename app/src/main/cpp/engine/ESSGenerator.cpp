@@ -89,7 +89,7 @@ void ESSGenerator::applyFadeOut(float* buffer, int numSamples, int fadeSamples) 
         return;
     }
 
-    // Raised-cosine fade-out: w[n] = 0.5 * (1 + cos(π * (n - (numSamples - fadeSamples)) / fadeSamples))
+    // Raised-cosine fade-out: w[n] = 0.5 * (1 + cos(π * (n - startSample) / fadeSamples))
     int startSample = numSamples - fadeSamples;
     for (int n = startSample; n < numSamples; ++n) {
         float w = 0.5f * (1.0f + std::cos(M_PI * (n - startSample) / fadeSamples));

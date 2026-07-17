@@ -16,6 +16,13 @@ class OboeEngine;
  * for the device's speaker-microphone transfer function. The filter is
  * computed once per device and persisted to SharedPreferences.
  */
+struct CalibrationCapture {
+    std::vector<std::complex<float>> recordedSpectrum; // FFT of input, length N
+    std::vector<std::complex<float>> inverseFilter;     // FFT of inverse, length N
+    float correlationScore; // 0..1, higher = better
+    float rmsEnergy;        // captured signal RMS
+};
+
 class CalibrationFilter {
 public:
     /**
@@ -37,6 +44,24 @@ public:
      * @return true if calibration succeeded
      */
     bool runCalibration(OboeEngine& oboeEngine);
+
+    /**
+     * Capture multiple calibration sweeps back-to-back.
+     * Runs count captures sequentially, computes per-capture correlation score.
+     * @param count Number of captures (default 3)
+     * @param sampleRate Sample rate in Hz
+     * @return Vector of CalibrationCapture, one per sweep
+     */
+    std::vector<CalibrationCapture> captureMultiple(int count, int sampleRate);
+
+    /**
+     * Build final FIR filter from multiple captures.
+     * Drops lowest-correlation capture, averages remaining 2, applies Hann window.
+     * @param captures Vector from captureMultiple()
+     * @param sampleRate Sample rate in Hz
+     * @return FIR coefficients (length kFilterLength)
+     */
+    std::vector<float> buildInverseFromCaptures(const std::vector<CalibrationCapture>& captures, float sampleRate);
 
     /**
      * Apply calibration filter to a signal.
@@ -102,6 +127,12 @@ public:
      */
     static void computeMagnitudeSpectrum(const float* window, int windowSize,
                                         float* outBins, int nBins);
+
+    /**
+     * Set filter coefficients directly (used after buildInverseFromCaptures).
+     * @param filter FIR coefficients (size kFilterLength)
+     */
+    void setFilter(const std::vector<float>& filter);
 
 private:
     /**

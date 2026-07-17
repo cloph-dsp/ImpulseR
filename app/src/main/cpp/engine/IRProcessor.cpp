@@ -59,7 +59,7 @@ bool IRProcessor::process(const float* input, int inputLen, float** output, int*
 
     // Apply half-Hann window to tail
     int noiseFloorInOutput = mNoiseFloorPosition - trimStart;
-    if (noiseFloorInOutput > 0 && noiseFloorInOutput < outputLength) {
+    if (noiseFloorInOutput > 0 && noiseFloorInOutput <= outputLength) {
         applyHalfHannWindow(*output, outputLength, noiseFloorInOutput);
     }
 

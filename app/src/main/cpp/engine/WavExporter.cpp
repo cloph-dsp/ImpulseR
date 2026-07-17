@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 #include <android/log.h>
 
 #define LOG_TAG "WavExporter"
@@ -82,16 +83,16 @@ void WavExporter::writeHeader(FILE* file, int numSamples, int sampleRate) {
 }
 
 int32_t WavExporter::floatTo24Bit(float sample) const {
-    // Clamp to [-1.0, 1.0]
-    sample = std::max(-1.0f, std::min(1.0f, sample));
-    
+    // Soft-limit extremes with tanh to avoid hard-clip distortion
+    // For |sample| <= 1.0, tanh(x) ≈ x, so no audible change
+    // For |sample| > 1.0, smoothly saturates toward ±1
+    if (sample > 1.0f || sample < -1.0f) {
+        sample = std::tanh(sample);
+    }
+
     // Convert to 24-bit signed integer
-    // 24-bit range: -8388608 to 8388607
     int32_t pcm = static_cast<int32_t>(sample * 8388607.0f);
-    
-    // Clamp to valid range
     pcm = std::max(-8388608, std::min(8388607, pcm));
-    
     return pcm;
 }
 

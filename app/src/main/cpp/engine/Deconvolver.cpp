@@ -259,14 +259,40 @@ bool Deconvolver::isolateLinearIR(const float* irFull, int N_fft, float** irOut,
     // Tail samples for natural decay
     int tailSamples = static_cast<int>(0.1f * mSampleRate); // 100ms tail
     
-    // Calculate window boundaries
+    // --- Multi-notch harmonic isolation: remove harmonics 2–5 of the speaker's distortion ---
+    // Work on a mutable copy of the full IR
+    std::vector<float> irClean(irFull, irFull + N_fft);
+
+    for (int harmonic = 2; harmonic <= 5; ++harmonic) {
+        int tau_n = static_cast<int>(tau_2 * harmonic);
+        if (tau_n >= N_fft - 5280) continue; // skip if window would exceed IR length
+        int windowStart = std::max(0, tau_n - 480);
+        int windowEnd   = std::min(N_fft, tau_n + 4800);
+
+        // Hann taper at window leading edge (240 samples = 5 ms at 48 kHz)
+        for (int i = 0; i < 240 && (windowStart + i) < windowEnd; ++i) {
+            float w = 0.5f * (1.0f - std::cos(M_PI * i / 240.0f));
+            irClean[windowStart + i] *= w;
+        }
+        // Hann taper at window trailing edge
+        for (int i = 0; i < 240 && (windowEnd - 1 - i) >= windowStart; ++i) {
+            float w = 0.5f * (1.0f - std::cos(M_PI * i / 240.0f));
+            irClean[windowEnd - 1 - i] *= w;
+        }
+        // Zero the body (after taper ramps) to remove harmonic contribution
+        for (int i = windowStart + 240; i < windowEnd - 240; ++i) {
+            irClean[i] = 0.0f;
+        }
+    }
+
+    // Calculate window boundaries for final IR extraction
     int startSample = N_fft - tau_2 + guardSamples;
     int endSample = N_fft + tailSamples;
-    
+
     // Clamp to valid range
     startSample = std::max(0, std::min(startSample, N_fft - 1));
     endSample = std::max(startSample + 1, std::min(endSample, N_fft));
-    
+
     // Allocate output buffer
     int irLength = endSample - startSample;
     *irOut = new float[irLength];
@@ -276,9 +302,9 @@ bool Deconvolver::isolateLinearIR(const float* irFull, int N_fft, float** irOut,
         return false;
     }
     *irLen = irLength;
-    
-    // Copy isolated IR
-    std::memcpy(*irOut, irFull + startSample, irLength * sizeof(float));
+
+    // Copy isolated IR (with Hann fade-in/fade-out baked into the window boundaries)
+    std::memcpy(*irOut, irClean.data() + startSample, irLength * sizeof(float));
     
     return true;
 }

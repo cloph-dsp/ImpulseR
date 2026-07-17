@@ -132,6 +132,11 @@ CalibrationFilter::~CalibrationFilter() {
     // No external resources to clean up
 }
 
+void CalibrationFilter::setFilter(const std::vector<float>& filter) {
+    mFilter = filter;
+    mIsCalibrated = true;
+}
+
 bool CalibrationFilter::runCalibration(OboeEngine& oboeEngine) {
     LOGI("Starting calibration...");
     
@@ -381,6 +386,121 @@ int CalibrationFilter::nextPowerOf2(int n) const {
         power *= 2;
     }
     return power;
+}
+
+std::vector<CalibrationFilter::CalibrationCapture>
+CalibrationFilter::captureMultiple(int count, int sampleRate) {
+    std::vector<CalibrationCapture> captures;
+    captures.reserve(count);
+
+    ESSGenerator essGen(mF1, mF2, mDuration, sampleRate);
+    int essSamples = essGen.getTotalSamples();
+    std::vector<float> referenceESS(essSamples);
+    essGen.generate(referenceESS.data(), essSamples);
+
+    int N_fft = nextPowerOf2(essSamples + static_cast<int>(2.0f * sampleRate));
+
+    for (int c = 0; c < count; ++c) {
+        LOGI("Multi-shot capture %d/%d", c + 1, count);
+
+        int captureSamples = essSamples + static_cast<int>(2.0f * sampleRate);
+        std::vector<float> recordedESS(captureSamples, 0.0f);
+
+        OboeEngine localEngine;
+        if (!localEngine.initialize()) {
+            LOGE("Multi-shot OboeEngine init failed");
+            return {};
+        }
+        if (!localEngine.captureWhilePlaying(referenceESS.data(), essSamples,
+                                              recordedESS.data(), captureSamples)) {
+            LOGE("Multi-shot capture %d failed", c + 1);
+            return {};
+        }
+
+        if (!computeTransferFunction(recordedESS.data(), captureSamples,
+                                     referenceESS.data(), essSamples)) {
+            LOGE("Multi-shot computeTransferFunction failed");
+            return {};
+        }
+
+        std::vector<float> invFir = mFilter;
+
+        float sumSqRec = 0.0f;
+        for (int i = 0; i < captureSamples; ++i) sumSqRec += recordedESS[i] * recordedESS[i];
+
+        std::vector<std::complex<float>> Y_fft(N_fft), X_fft2(N_fft);
+        for (int i = 0; i < captureSamples && i < N_fft; ++i) Y_fft[i] = recordedESS[i];
+        for (int i = captureSamples; i < N_fft; ++i) Y_fft[i] = std::complex<float>(0.0f, 0.0f);
+        for (int i = 0; i < essSamples; ++i) X_fft2[i] = referenceESS[i];
+        for (int i = essSamples; i < N_fft; ++i) X_fft2[i] = std::complex<float>(0.0f, 0.0f);
+        fft_inplace(Y_fft);
+        fft_inplace(X_fft2);
+
+        std::vector<std::complex<float>> cross(N_fft);
+        for (int i = 0; i < N_fft; ++i) cross[i] = Y_fft[i] * std::conj(X_fft2[i]);
+        ifft_inplace(cross);
+
+        float maxCorr = 0.0f;
+        for (int i = 0; i < N_fft; ++i) {
+            float v = std::abs(cross[i]);
+            if (v > maxCorr) maxCorr = v;
+        }
+        float sumSqRef = 0.0f;
+        for (int i = 0; i < essSamples; ++i) sumSqRef += referenceESS[i] * referenceESS[i];
+        float denom = std::sqrt(sumSqRef * sumSqRec + 1e-12f);
+        // ponytail: correlation heuristic — max cross-corr / sqrt(energies); ceiling: drops < 0.5, per-bin SNR upgrade.
+        float correlationScore = (denom > 0.0f) ? (maxCorr / denom) : 0.0f;
+
+        CalibrationCapture cap;
+        cap.recordedSpectrum = std::move(Y_fft);
+        cap.inverseFilter = std::move(invFir);
+        cap.correlationScore = correlationScore;
+        cap.rmsEnergy = (captureSamples > 0) ? std::sqrt(sumSqRec / static_cast<float>(captureSamples)) : 0.0f;
+        captures.push_back(std::move(cap));
+    }
+
+    return captures;
+}
+
+std::vector<float>
+CalibrationFilter::buildInverseFromCaptures(const std::vector<CalibrationCapture>& captures,
+                                            float sampleRate) {
+    (void)sampleRate;
+    if (captures.empty()) return {};
+
+    std::vector<const CalibrationCapture*> sorted;
+    sorted.reserve(captures.size());
+    for (const auto& c : captures) sorted.push_back(&c);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const CalibrationCapture* a, const CalibrationCapture* b) {
+                  return a->correlationScore > b->correlationScore;
+              });
+
+    // ponytail: drop-1-outlier (lowest correlation); ceiling: keep all 3 if score std < 0.05, weighted avg when robust.
+    int nUse = std::min(2, static_cast<int>(sorted.size()));
+    LOGI("Using %d/%zu captures (scores: %.3f, %.3f, %.3f)",
+         nUse, captures.size(),
+         captures.size() > 0 ? captures[0].correlationScore : 0.0f,
+         captures.size() > 1 ? captures[1].correlationScore : 0.0f,
+         captures.size() > 2 ? captures[2].correlationScore : 0.0f);
+
+    int flen = kFilterLength;
+    std::vector<float> avgFilter(flen, 0.0f);
+    for (int i = 0; i < nUse; ++i) {
+        const auto& cap = *sorted[i];
+        int capLen = static_cast<int>(cap.inverseFilter.size());
+        int copyLen = std::min(flen, capLen);
+        for (int j = 0; j < copyLen; ++j) avgFilter[j] += cap.inverseFilter[j];
+    }
+    for (int i = 0; i < flen; ++i) avgFilter[i] /= static_cast<float>(nUse);
+
+    // Hann window
+    for (int i = 0; i < flen; ++i) {
+        float w = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / (flen - 1)));
+        avgFilter[i] *= w;
+    }
+
+    return avgFilter;
 }
 
 } // namespace impulser
