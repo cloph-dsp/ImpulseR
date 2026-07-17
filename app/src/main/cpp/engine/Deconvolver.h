@@ -108,6 +108,10 @@ private:
     // Calibration filter
     std::vector<float> mCalibrationFilter;
     bool mHasCalibrationFilter = false;
+
+    // Cached FFT of calibration filter
+    std::vector<std::complex<float>> mCalibrationFilterFreq;
+    int mCalibrationFilterN = 0;
     
     // Latency compensation
     int mRoundTripDelaySamples = 0;

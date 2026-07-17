@@ -180,7 +180,6 @@ private:
     std::atomic<bool> mOutputStopCompleted{false};
 
     // Configuration
-    static constexpr int kSampleRate = 48000;
     static constexpr int kChannelCount = 1; // Mono
     static constexpr int kFramesPerBurst = 192; // Typical for 48kHz
     static constexpr int kRingBufferSize = 16384; // Power of 2, >= 4x burst size (128 * 128)
@@ -188,7 +187,7 @@ private:
     // State
     std::atomic<bool> mIsRunning{false};
     int mRoundTripDelaySamples = 0;
-    int mSampleRate = kSampleRate;
+    int mSampleRate = 48000;
 
     // Callback
     IRCaptureCallback* mCaptureCallback = nullptr;
@@ -201,6 +200,28 @@ private:
 
     // Ring buffer for captured audio
     std::unique_ptr<RingBuffer<float>> mCaptureBuffer;
+
+    // Capture diagnostics
+    std::atomic<bool> mCaptureClipped{false};
+    float mPeakAmplitude = 0.0f;
+    std::atomic<bool> mCaptureOverflowed{false};
+
+    // Pre-roll/post-roll padding (in samples at current sample rate)
+    // ponytail: post-roll not implemented — audio callback has no sweep-end signal
+    int mPreRollSamples = 4800;   // 100 ms at 48 kHz
+    int mPostRollSamples = 72000;  // 1.5 s at 48 kHz (allocated but not used)
+
+    /**
+     * Check if capture clipped (any sample ≥ 0.99f absolute).
+     * Resets at start of each new capture.
+     */
+    bool wasCaptureClipped() const { return mCaptureClipped; }
+
+    /**
+     * Check if the capture ring buffer overflowed at any point.
+     * Resets at start of each new capture.
+     */
+    bool wasCaptureOverflowed() const { return mCaptureOverflowed; }
 
     // Temporary buffer for output audio (sine wave for testing)
     std::vector<float> mOutputBuffer;

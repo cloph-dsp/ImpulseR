@@ -34,7 +34,7 @@ bool OboeEngine::initialize() {
                  ->setSharingMode(oboe::SharingMode::Shared)
                  ->setFormat(oboe::AudioFormat::Float)
                  ->setChannelCount(kChannelCount)
-                 ->setSampleRate(kSampleRate)
+                 ->setSampleRate(48000)
                  ->setDataCallback(this)
                  ->setErrorCallback(this);
 
@@ -60,7 +60,7 @@ bool OboeEngine::initialize() {
                 ->setSharingMode(oboe::SharingMode::Shared)
                 ->setFormat(oboe::AudioFormat::Float)
                 ->setChannelCount(kChannelCount)
-                ->setSampleRate(kSampleRate)
+                ->setSampleRate(48000)
                 ->setInputPreset(oboe::InputPreset::Unprocessed)
                 ->setDataCallback(this)
                 ->setErrorCallback(this);
@@ -78,8 +78,10 @@ bool OboeEngine::initialize() {
           static_cast<int>(mInputStream->getFormat()),
           static_cast<int>(mInputStream->getInputPreset()));
 
+    if (mOutputStream) mSampleRate = mOutputStream->getSampleRate();
+
     // see comment above; same deferral for input stream
-     
+      
 // Initialize ring buffer after streams are opened
       try {
           mCaptureBuffer = std::make_unique<RingBuffer<float>>(kRingBufferSize);
@@ -226,9 +228,16 @@ oboe::DataCallbackResult OboeEngine::onAudioReady(
 
         const float* inputBuffer = static_cast<const float*>(audioData);
 
+        for (int i = 0; i < numFrames; ++i) {
+            float s = std::abs(inputBuffer[i]);
+            if (s > mPeakAmplitude) mPeakAmplitude = s;
+            if (s >= 0.99f) mCaptureClipped = true;
+        }
+
         size_t written = mCaptureBuffer->write(inputBuffer, numFrames);
         if (written < static_cast<size_t>(numFrames)) {
             LOGW("Ring buffer overflow: wrote %zu/%d frames", written, numFrames);
+            mCaptureOverflowed = true;
         }
 
         if (mCaptureCallback && mCaptureBuffer->available() >= numFrames) {
@@ -268,24 +277,23 @@ void OboeEngine::disableAudioEffects() {
 }
 
 void OboeEngine::measureLatency() {
-    // Get timestamps from both streams to calculate round-trip delay
-    int64_t outputTimestamp = 0;
-    int64_t inputTimestamp = 0;
-    
-    if (mOutputStream && mInputStream) {
-        // Note: getTimestamp requires the streams to be running
-        // For now, we'll use a default value and measure during actual capture
-        // In production, we would:
-        // 1. Start both streams
-        // 2. Play a known signal
-        // 3. Record and correlate to find the delay
-        
-        // Default estimate: typical Android latency is ~10-20ms
-        // At 48kHz, that's 480-960 samples
-        mRoundTripDelaySamples = 960; // 20ms default
-        
-        LOGI("Using default round-trip delay estimate: %d samples", mRoundTripDelaySamples);
+    if (!mOutputStream || !mInputStream) {
+        mRoundTripDelaySamples = 960; // fallback
+        return;
     }
+    auto outLat = mOutputStream->calculateLatencyMillis();
+    auto inLat = mInputStream->calculateLatencyMillis();
+    if (!outLat || !inLat) {
+        mRoundTripDelaySamples = 960;
+        return;
+    }
+    double totalMs = outLat.value() + inLat.value();
+    int samples = static_cast<int>(std::round(totalMs * mSampleRate / 1000.0));
+    if (samples < 100) samples = 100;
+    if (samples > 48000) samples = 48000;
+    mRoundTripDelaySamples = samples;
+    LOGI("Measured latency: %.2f ms (out=%.2f ms, in=%.2f ms) -> %d samples",
+          totalMs, outLat.value(), inLat.value(), samples);
 }
 
 bool OboeEngine::captureWhilePlaying(const float* essData, int essSamples,
@@ -305,6 +313,9 @@ bool OboeEngine::captureWhilePlaying(const float* essData, int essSamples,
         return false;
     }
     mCaptureBuffer->clear();
+    mCaptureClipped = false;
+    mPeakAmplitude = 0.0f;
+    mCaptureOverflowed = false;
 
     oboe::Result result = mOutputStream->requestStart();
     if (result != oboe::Result::OK) {
@@ -321,6 +332,12 @@ bool OboeEngine::captureWhilePlaying(const float* essData, int essSamples,
         return false;
     }
 
+    // Pre-roll: write silence before capture begins
+    if (mPreRollSamples > 0) {
+        std::vector<float> preRoll(mPreRollSamples, 0.0f);
+        mCaptureBuffer->write(preRoll.data(), mPreRollSamples);
+    }
+
     int totalSamples = essSamples + captureSamples;
     int waitCount = 0;
     int maxWait = (totalSamples * 1000) / mSampleRate + 100;
@@ -333,6 +350,10 @@ bool OboeEngine::captureWhilePlaying(const float* essData, int essSamples,
     mInputStream->requestStop();
     mOutputStream->requestStop();
     clearPlaybackData();
+
+    if (mCaptureClipped) {
+        LOGW("Capture clipped at peak=%.3f", mPeakAmplitude);
+    }
 
     int captured = mCaptureBuffer->read(captureBuffer, captureSamples);
     LOGI("Captured %d samples", captured);

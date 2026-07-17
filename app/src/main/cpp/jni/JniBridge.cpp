@@ -84,18 +84,24 @@ Java_com_impulser_engine_NativeEngine_nativeCreate(JNIEnv* env, jobject thiz) {
     LOGI("Creating native engine");
     
     try {
-gOboeEngine = std::make_unique<OboeEngine>();
+        gOboeEngine = std::make_unique<OboeEngine>();
     if (!gOboeEngine->initialize()) {
         LOGE("Failed to initialize OboeEngine");
         return 0;
     }
-    
+
+    // Read the actual sample rate the stream opened at
+    if (gOboeEngine) {
+        int actualRate = gOboeEngine->getSampleRate();
+        if (actualRate > 0) gSampleRate = actualRate;
+    }
+
     // Initialize ESS generator
     gESSGenerator = std::make_unique<ESSGenerator>(20.0f, 20000.0f, 7.0f, gSampleRate);
-    
+
     // Initialize calibration filter
     gCalibrationFilter = std::make_unique<CalibrationFilter>(20.0f, 20000.0f, 7.0f, gSampleRate);
-    
+
     // Initialize deconvolver and IR processor
     gDeconvolver = std::make_unique<Deconvolver>(20.0f, 20000.0f, 7.0f, gSampleRate);
     gIRProcessor = std::make_unique<IRProcessor>(gSampleRate);
@@ -494,12 +500,14 @@ Java_com_impulser_capture_MainActivity_nativeGetSpectrumData(JNIEnv* env, jobjec
             gSpectrumData[i] = (dist < 3) ? (1.0f - dist * 0.3f) * progress : 0;
         }
     } else if (state == REVIEW) {
-        for (int i = 0; i < kSpectrumBins; i++) {
-            float freq = kFreq20 * std::exp(i * kInv63 * kLog1000);
-            float bass = (freq * 0.01f);
-            float treble = (kFreq20k / freq);
-            float noise = 0.3f * (0.5f - std::abs(std::sin(i * 12.9898f)));
-            gSpectrumData[i] = (bass * 0.7f + 0.3f) * treble * (0.7f + noise);
+        if (!gProcessedIR.empty()) {
+            CalibrationFilter::computeMagnitudeSpectrum(
+                gProcessedIR.data(),
+                static_cast<int>(gProcessedIR.size()),
+                gSpectrumData,
+                kSpectrumBins);
+        } else {
+            std::fill(gSpectrumData, gSpectrumData + kSpectrumBins, 0.0f);
         }
     } else {
         for (int i = 0; i < kSpectrumBins; i++) gSpectrumData[i] = 0;

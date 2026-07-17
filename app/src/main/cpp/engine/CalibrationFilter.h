@@ -26,7 +26,7 @@ public:
      * @param duration Calibration sweep duration in seconds
      * @param sampleRate Sample rate in Hz
      */
-    CalibrationFilter(float f1 = 20.0f, float f2 = 20000.0f, float duration = 3.0f, int sampleRate = 48000);
+    CalibrationFilter(float f1 = 20.0f, float f2 = 20000.0f, float duration = 7.0f, int sampleRate = 48000);
 
     ~CalibrationFilter();
 
@@ -140,7 +140,7 @@ private:
     
     // Calibration filter
     std::vector<float> mFilter;
-    static constexpr int kFilterLength = 2048; // 42.7ms at 48kHz
+    static constexpr int kFilterLength = 8192; // 170.7ms at 48kHz
     
     // State
     bool mIsCalibrated = false;

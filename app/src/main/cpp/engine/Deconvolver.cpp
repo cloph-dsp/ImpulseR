@@ -20,8 +20,7 @@ namespace {
  * Cooley-Tukey radix-2 in-place FFT.
  * N must be a power of 2.
  */
-void fft_inplace(std::vector<std::complex<float>>& a) {
-    const int N = static_cast<int>(a.size());
+void fft_inplace(std::complex<float>* a, int N) {
     if (N <= 1) return;
 
     // Bit-reversal permutation
@@ -52,6 +51,10 @@ void fft_inplace(std::vector<std::complex<float>>& a) {
             }
         }
     }
+}
+
+inline void fft_inplace(std::vector<std::complex<float>>& a) {
+    fft_inplace(a.data(), static_cast<int>(a.size()));
 }
 
 /**
@@ -225,14 +228,20 @@ int Deconvolver::nextPowerOf2(int n) const {
 }
 
 void Deconvolver::applyCalibrationFilter(std::complex<float>* spectrum, int N) {
-    // Apply calibration filter in frequency domain
-    // This is a simplified version - in production, we would:
-    // 1. FFT the calibration filter
-    // 2. Multiply with the spectrum
-    // 3. Handle the complex multiplication properly
-    
-    // For now, we'll skip this and apply it in time domain
-    // The CalibrationFilter class will handle the actual application
+    if (mCalibrationFilter.empty() || N <= 0) return;
+    if (mCalibrationFilterN != N || mCalibrationFilterFreq.size() != static_cast<size_t>(N)) {
+        mCalibrationFilterFreq.assign(N, std::complex<float>(0.0f, 0.0f));
+        int taps = static_cast<int>(mCalibrationFilter.size());
+        int copy = std::min(taps, N);
+        for (int i = 0; i < copy; ++i) {
+            mCalibrationFilterFreq[i] = std::complex<float>(mCalibrationFilter[i], 0.0f);
+        }
+        fft_inplace(mCalibrationFilterFreq.data(), N);
+        mCalibrationFilterN = N;
+    }
+    for (int k = 0; k < N; ++k) {
+        spectrum[k] *= mCalibrationFilterFreq[k];
+    }
 }
 
 bool Deconvolver::isolateLinearIR(const float* irFull, int N_fft, float** irOut, int* irLen) {

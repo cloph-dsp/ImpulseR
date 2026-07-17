@@ -1,6 +1,11 @@
 #include "ESSGenerator.h"
 #include <algorithm>
 #include <stdexcept>
+#include <android/log.h>
+
+#ifndef LOGW
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "ESSGenerator", __VA_ARGS__)
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -26,6 +31,13 @@ ESSGenerator::ESSGenerator(float f1, float f2, float duration, int sampleRate)
     }
     if (sampleRate <= 0) {
         throw std::invalid_argument("Sample rate must be positive");
+    }
+
+    // Anti-aliasing guard: cap f2 to avoid DAC non-linearities aliasing above fs/2
+    double f2Max = static_cast<double>(sampleRate) * 0.45;
+    if (static_cast<double>(mF2) > f2Max) {
+        LOGW("ESSGenerator: f2=%.1f capped to %.1f (anti-aliasing guard)", mF2, f2Max);
+        mF2 = static_cast<float>(f2Max);
     }
 
     // Calculate sweep rate parameter L = T / log(f2/f1)

@@ -84,6 +84,7 @@ void CalibrationFilter::computeMagnitudeSpectrum(const float* window, int window
     // Pad to next power of 2
     int N = 1;
     while (N < windowSize) N <<= 1;
+    int safeBins = std::min(nBins, N / 2);
     std::vector<std::complex<float>> fftBuffer(N);
 
     // Copy window to complex buffer
@@ -97,25 +98,20 @@ void CalibrationFilter::computeMagnitudeSpectrum(const float* window, int window
     // Run FFT (use the local fft_inplace from anonymous namespace)
     fft_inplace(fftBuffer);
 
-    // Compute magnitude and convert to log scale [0, 1]
     // Find max magnitude for normalization
     float maxMag = 1e-6f;
-    for (int i = 0; i < N / 2; i++) {
+    for (int i = 0; i < safeBins; i++) {
         float mag = std::abs(fftBuffer[i]);
         if (mag > maxMag) maxMag = mag;
     }
 
-    // Log-magnitude: log10(max(mag, epsilon)) normalized
-    const float epsilon = 1e-6f;
-    const float log10_epsilon = -6.0f; // log10(1e-6)
-
-    for (int i = 0; i < nBins; i++) {
-        float mag = std::abs(fftBuffer[i]);
-        float logMag = std::log10(std::max(mag, epsilon));
-        // Normalize to [0, 1] range
-        outBins[i] = (logMag - log10_epsilon) / (-log10_epsilon);
-        if (outBins[i] < 0.0f) outBins[i] = 0.0f;
-        if (outBins[i] > 1.0f) outBins[i] = 1.0f;
+    // Linear magnitude normalized to [0, 1] where peak = 1
+    for (int i = 0; i < safeBins; i++) {
+        outBins[i] = std::abs(fftBuffer[i]) / maxMag;
+    }
+    // Fill remaining bins with zeros
+    for (int i = safeBins; i < nBins; i++) {
+        outBins[i] = 0.0f;
     }
 }
 
@@ -146,7 +142,7 @@ bool CalibrationFilter::runCalibration(OboeEngine& oboeEngine) {
         return true;
     }
     
-    // Generate reference ESS (3 seconds)
+    // Generate reference ESS (7 seconds, same duration as measurement sweep)
     ESSGenerator essGen(mF1, mF2, mDuration, mSampleRate);
     int essSamples = essGen.getTotalSamples();
     std::vector<float> referenceESS(essSamples);
@@ -280,25 +276,9 @@ bool CalibrationFilter::save(const std::string& deviceId) {
 std::string CalibrationFilter::getDeviceId() {
     char manufacturer[PROP_VALUE_MAX] = {0};
     char model[PROP_VALUE_MAX] = {0};
-    char fingerprint[PROP_VALUE_MAX] = {0};
-    
     __system_property_get("ro.product.manufacturer", manufacturer);
     __system_property_get("ro.product.model", model);
-    __system_property_get("ro.build.fingerprint", fingerprint);
-    
-    std::string deviceId;
-    deviceId.reserve(PROP_VALUE_MAX * 3 + 2);
-    deviceId.append(manufacturer);
-    deviceId.push_back('_');
-    deviceId.append(model);
-    deviceId.push_back('_');
-    deviceId.append(fingerprint);
-    
-    // Simple hash function
-    std::hash<std::string> hasher;
-    size_t hash = hasher(deviceId);
-    
-    return std::to_string(hash);
+    return std::string(manufacturer) + ":" + std::string(model);
 }
 
 bool CalibrationFilter::computeTransferFunction(const float* recorded, int recLen,
@@ -326,13 +306,26 @@ bool CalibrationFilter::computeTransferFunction(const float* recorded, int recLe
     fft_inplace(Y);
     fft_inplace(X);
 
-    const float epsilon = 1e-3f;
+    // SNR-adaptive epsilon regularization
+    std::vector<float> mag2(N_fft / 2);
+    for (int k = 1; k < N_fft / 2; ++k) {
+        mag2[k - 1] = std::norm(X[k]);
+    }
+    int safeLen = N_fft / 2 - 1;
+    std::nth_element(mag2.begin(), mag2.begin() + safeLen / 2, mag2.end());
+    float bandMedian = mag2[safeLen / 2];
+    float eps = std::max(bandMedian * 1e-3f, 1e-12f);
+    float killFloor = bandMedian * 1e-6f;
 
     std::vector<std::complex<float>> H_dev(N_fft);
     for (int k = 0; k < N_fft; ++k) {
         float X_mag2 = std::norm(X[k]);
-        float denom = X_mag2 + epsilon;
-        H_dev[k] = std::conj(X[k]) * Y[k] / denom;
+        if (X_mag2 < killFloor) {
+            H_dev[k] = std::complex<float>(0.0f, 0.0f);
+        } else {
+            float denom = X_mag2 + eps;
+            H_dev[k] = std::conj(X[k]) * Y[k] / denom;
+        }
     }
 
     computeInverseFilter(H_dev.data(), N_fft);
@@ -342,12 +335,25 @@ bool CalibrationFilter::computeTransferFunction(const float* recorded, int recLe
 
 void CalibrationFilter::computeInverseFilter(const std::complex<float>* H_dev, int N) {
     std::vector<std::complex<float>> H_corr(N);
-    const float epsilon = 1e-3f;
+
+    std::vector<float> mag2(N / 2);
+    for (int k = 1; k < N / 2; ++k) {
+        mag2[k - 1] = std::norm(H_dev[k]);
+    }
+    int safeLen = N / 2 - 1;
+    std::nth_element(mag2.begin(), mag2.begin() + safeLen / 2, mag2.end());
+    float bandMedian = mag2[safeLen / 2];
+    float eps = std::max(bandMedian * 1e-3f, 1e-12f);
+    float killFloor = bandMedian * 1e-6f;
 
     for (int k = 0; k < N; ++k) {
         float H_mag2 = std::norm(H_dev[k]);
-        float denom = H_mag2 + epsilon;
-        H_corr[k] = std::conj(H_dev[k]) / denom;
+        if (H_mag2 < killFloor) {
+            H_corr[k] = std::complex<float>(0.0f, 0.0f);
+        } else {
+            float denom = H_mag2 + eps;
+            H_corr[k] = std::conj(H_dev[k]) / denom;
+        }
     }
 
     ifft_inplace(H_corr);
@@ -355,7 +361,7 @@ void CalibrationFilter::computeInverseFilter(const std::complex<float>* H_dev, i
     int halfFilter = kFilterLength / 2;
     mFilter.resize(kFilterLength, 0.0f);
 
-    int startIdx = N / 2 - halfFilter;
+    int startIdx = 0;
     for (int i = 0; i < kFilterLength; ++i) {
         int idx = startIdx + i;
         if (idx >= 0 && idx < N) {
