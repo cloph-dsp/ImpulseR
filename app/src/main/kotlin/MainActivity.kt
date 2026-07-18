@@ -1,8 +1,10 @@
 package com.impulser.capture
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -41,6 +43,7 @@ class MainActivity : ComponentActivity() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var exportedPath: String? = null
     private var irSampleData: FloatArray = FloatArray(0)
+    private var audioLostReceiver: BroadcastReceiver? = null
     
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -74,6 +77,26 @@ class MainActivity : ComponentActivity() {
             NativeEngine.create()
         }
         
+        audioLostReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val currentState = NativeEngine.appState.value
+                when (currentState) {
+                    AppState.SWEEPING -> {
+                        NativeEngine.stopSweep()
+                        NativeEngine.statusMessage.value = "Capture aborted: audio device changed"
+                    }
+                    AppState.CALIBRATING -> {
+                        // ponytail: no native calibration cancel — discard resets to IDLE cleanly
+                        NativeEngine.discard()
+                        NativeEngine.statusMessage.value = "Calibration aborted: audio device changed"
+                    }
+                    else -> {}
+                }
+            }
+        }
+        val filter = IntentFilter(AudioCaptureForegroundService.ACTION_AUDIO_LOST)
+        registerReceiver(audioLostReceiver, filter, Context.NOT_EXPORTED)
+
         setContent {
             var uiState by remember { mutableStateOf(UIState.IDLE) }
             var spectrumData by remember { mutableStateOf(FloatArray(64) { 0f }) }
@@ -582,6 +605,8 @@ if (uiState == UIState.REVIEW && irSampleCount > 0) {
     
     override fun onDestroy() {
         super.onDestroy()
+        audioLostReceiver?.let { unregisterReceiver(it) }
+        audioLostReceiver = null
         NativeEngine.destroy()
         scope.cancel()
         keepScreenOn = false
