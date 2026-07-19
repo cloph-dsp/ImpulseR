@@ -101,11 +101,21 @@ public:
      * Get FFT magnitude spectrum of the last 1024 playback samples.
      * Reads last 1024 samples of mPlaybackData (zero-pads if not enough),
      * computes log-magnitude spectrum, returns first nBins bins.
-     * 
+     *
      * @param outBins Output array for magnitude bins (size nBins)
      * @param nBins Number of bins to output
      */
     void getCurrentSpectrum(float* outBins, int nBins);
+
+    /**
+     * Get FFT magnitude spectrum of the last 1024 input (microphone) samples.
+     * Peeks last 1024 samples from mCaptureBuffer (zero-pads if not enough),
+     * computes log-magnitude spectrum, returns first nBins bins.
+     *
+     * @param outBins Output array for magnitude bins (size nBins)
+     * @param nBins Number of bins to output
+     */
+    void getInputSpectrum(float* outBins, int nBins);
 
     /**
       * Get the ring buffer containing captured audio.

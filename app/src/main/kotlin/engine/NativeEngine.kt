@@ -244,6 +244,16 @@ object NativeEngine {
         }
     }
 
+    fun getInputSpectrum(bins: FloatArray): Boolean {
+        if (nativeHandle == 0L) return false
+        return try {
+            nativeGetInputSpectrum(bins, bins.size)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun setSpectrogramSurface(surfacePtr: Long) {
         if (nativeHandle == 0L) return
         nativeSetSpectrogramSurface(surfacePtr)
@@ -284,6 +294,7 @@ object NativeEngine {
     private external fun nativeGetInputLevel(): Float
     private external fun nativeGetCurrentSpectrum(bins: FloatArray)
     private external fun nativeGetIRSpectrum(bins: FloatArray)
+    private external fun nativeGetInputSpectrum(bins: FloatArray, nBins: Int): Boolean
     private external fun nativeArm(): Boolean
     private external fun nativeStartSweep(): Boolean
     private external fun nativeStopSweep()

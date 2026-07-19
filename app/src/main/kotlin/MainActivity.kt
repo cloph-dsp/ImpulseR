@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -621,33 +622,80 @@ fun SpectrumVisualizer(
     data: FloatArray,
     modifier: Modifier = Modifier
 ) {
-    Canvas(modifier = modifier) {
-        val barCount = data.size
-        val barWidth = size.width / barCount
-        val maxHeight = size.height * 0.9f
-        
-        data.forEachIndexed { index, value ->
-            val barHeight = (value * maxHeight).coerceAtLeast(0f)
-            val x = index * barWidth
-            
-            val hue = (value * 30f).coerceIn(0f, 30f)
-            val color = Color.hsv(30f - hue, 1f, 1f)
-            
-            drawRect(
-                color = color,
-                topLeft = Offset(x + 2, size.height - barHeight),
-                size = androidx.compose.ui.geometry.Size(barWidth - 4, barHeight)
-            )
-            
-            if (barHeight > 20) {
-                drawRect(
-                    color = color.copy(alpha = 0.3f),
-                    topLeft = Offset(x + 2, size.height),
-                    size = androidx.compose.ui.geometry.Size(barWidth - 4, barHeight * 0.3f)
-                )
+    // Peak hold state with slow decay
+    val peakData = remember { FloatArray(64) { 0f } }
+
+    // Update peaks with decay
+    LaunchedEffect(data) {
+        if (data.isNotEmpty()) {
+            for (i in data.indices) {
+                peakData[i] = maxOf(peakData[i] * 0.95f, data[i])
             }
         }
-        
+    }
+
+    Canvas(modifier = modifier) {
+        val barCount = 64
+        val barWidth = size.width / barCount
+        val maxHeight = size.height * 0.9f
+        val sampleRate = 48000
+
+        // Log-spaced frequency interpolation
+        val logData = FloatArray(barCount)
+        if (data.isNotEmpty()) {
+            val fftSize = data.size
+            for (i in 0 until barCount) {
+                // Log-spaced center frequency: 20Hz to 20kHz
+                val freq = (20.0 * Math.pow(10.0, i.toDouble() / 10.0)).toFloat()
+                // Map frequency to FFT bin index
+                val binIndex = (freq * fftSize * 2f / sampleRate).toInt()
+                // Interpolate from nearest bins
+                logData[i] = when {
+                    binIndex < 0 -> data[0]
+                    binIndex >= fftSize - 1 -> data[fftSize - 1]
+                    else -> {
+                        val frac: Float = (freq * fftSize * 2f / sampleRate) - binIndex.toFloat()
+                        data[binIndex] * (1f - frac) + data[binIndex + 1] * frac
+                    }
+                }
+            }
+        }
+
+        // Draw smooth filled path
+        val path = Path()
+        if (logData.isNotEmpty()) {
+            path.moveTo(0f, size.height)
+            logData.forEachIndexed { index, value ->
+                val x = index * barWidth
+                val y = size.height - (value * maxHeight)
+                path.lineTo(x, y)
+            }
+            path.lineTo(size.width, size.height)
+            path.close()
+        }
+
+        // Main filled area
+        drawPath(
+            path = path,
+            color = Color(0xFF00BFFF)
+        )
+
+        // Peak hold line
+        if (logData.isNotEmpty()) {
+            val peakPath = Path()
+            peakPath.moveTo(0f, size.height - peakData[0] * maxHeight)
+            logData.indices.forEach { i ->
+                val x = i * barWidth
+                val y = size.height - (peakData[i] * maxHeight)
+                peakPath.lineTo(x, y)
+            }
+            drawPath(
+                path = peakPath,
+                color = Color(0xFFFFD700)
+            )
+        }
+
+        // Grid lines
         for (i in 1..4) {
             val y = size.height * i / 5
             drawLine(

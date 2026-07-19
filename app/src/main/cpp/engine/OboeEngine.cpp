@@ -398,4 +398,36 @@ void OboeEngine::getCurrentSpectrum(float* outBins, int nBins) {
     CalibrationFilter::computeMagnitudeSpectrum(window, kWindowSize, outBins, nBins);
 }
 
+void OboeEngine::getInputSpectrum(float* outBins, int nBins) {
+    static constexpr int kWindowSize = 1024;
+
+    if (outBins == nullptr || nBins <= 0) {
+        return;
+    }
+
+    if (mCaptureBuffer == nullptr) {
+        for (int i = 0; i < nBins; i++) outBins[i] = 0.0f;
+        return;
+    }
+
+    // Peek last 1024 samples from capture buffer (zero-pad if not enough)
+    float window[kWindowSize];
+    size_t available = mCaptureBuffer->available();
+
+    if (available >= kWindowSize) {
+        // Have enough samples, peek the last 1024
+        mCaptureBuffer->peek(window, kWindowSize);
+    } else {
+        // Zero-pad the beginning
+        for (int i = 0; i < kWindowSize - static_cast<int>(available); i++) {
+            window[i] = 0.0f;
+        }
+        if (available > 0) {
+            mCaptureBuffer->peek(window + (kWindowSize - static_cast<int>(available)), available);
+        }
+    }
+
+    CalibrationFilter::computeMagnitudeSpectrum(window, kWindowSize, outBins, nBins);
+}
+
 } // namespace impulser

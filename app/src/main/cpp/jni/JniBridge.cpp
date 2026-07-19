@@ -249,6 +249,19 @@ Java_com_impulser_engine_NativeEngine_nativeGetIRSpectrum(JNIEnv* env, jobject t
 }
 
 JNIEXPORT jboolean JNICALL
+Java_com_impulser_engine_NativeEngine_nativeGetInputSpectrum(JNIEnv* env, jobject thiz, jfloatArray jBins, jint nBins) {
+    if (!gOboeEngine || jBins == nullptr || nBins <= 0) {
+        return JNI_FALSE;
+    }
+
+    std::vector<float> bins(nBins);
+    gOboeEngine->getInputSpectrum(bins.data(), nBins);
+
+    env->SetFloatArrayRegion(jBins, 0, nBins, bins.data());
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
 Java_com_impulser_engine_NativeEngine_nativeArm(JNIEnv* env, jobject thiz) {
     LOGI("Arming capture");
     
