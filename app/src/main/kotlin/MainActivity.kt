@@ -24,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.text.font.FontFamily
@@ -115,6 +116,9 @@ class MainActivity : ComponentActivity() {
             var isProcessing by remember { mutableStateOf(false) }
             var irFilename by remember { mutableStateOf("") }
             var chosenFolderUri by remember { mutableStateOf<Uri?>(null) }
+            // Spectrogram history: last N frames of FFT magnitude (log-mapped to 64 bins)
+            val spectrogramRows = 32
+            var spectrogramHistory by remember { mutableStateOf(Array(spectrogramRows) { FloatArray(64) { 0f } }) }
             val scope = rememberCoroutineScope()
             val ctx = this@MainActivity
 
@@ -193,6 +197,11 @@ class MainActivity : ComponentActivity() {
                             inputLevel = NativeEngine.getInputLevel()
                             sweepProgress = NativeEngine.getPlaybackProgress()
                             NativeEngine.getCurrentSpectrum(spectrumData)
+                            // Shift history down and insert new row at top
+                            for (i in spectrogramRows - 1 downTo 1) {
+                                spectrogramHistory[i] = spectrogramHistory[i - 1]
+                            }
+                            spectrogramHistory[0] = spectrumData.copyOf()
                         }
                         UIState.PROCESSING -> {
                             sweepProgress = NativeEngine.getProcessingProgress()
@@ -210,17 +219,32 @@ class MainActivity : ComponentActivity() {
                     .fillMaxSize()
                     .background(Color(0xFF0A0A0A))
             ) {
-                Box(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(0.65f)
                         .background(Color(0xFF000000))
                 ) {
-                    SpectrumVisualizer(
-                        data = spectrumData,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    
+                    Box(modifier = Modifier.weight(1f)) {
+                        SpectrumVisualizer(
+                            data = spectrumData,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    if (uiState == UIState.SWEEPING) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            SpectrogramVisualizer(
+                                history = spectrogramHistory,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(0.1f)
+                ) {
                     Text(
                         text = when (uiState) {
                             UIState.IDLE -> "IDLE"
@@ -704,6 +728,40 @@ fun SpectrumVisualizer(
                 end = Offset(size.width, y),
                 strokeWidth = 1f
             )
+        }
+    }
+}
+
+@Composable
+fun SpectrogramVisualizer(
+    history: Array<FloatArray>,
+    modifier: Modifier = Modifier,
+    rows: Int = 32
+) {
+    Canvas(modifier = modifier) {
+        val barWidth = size.width / 64
+        val rowHeight = size.height / rows
+
+        history.forEachIndexed { rowIdx, row ->
+            row.forEachIndexed { binIdx, value ->
+                val x = binIdx * barWidth
+                val y = rowIdx * rowHeight
+
+                val intensity = value.coerceIn(0f, 1f)
+                val color = when {
+                    intensity < 0.2f -> Color(0xFF001F3F)
+                    intensity < 0.4f -> Color(0xFF0074D9)
+                    intensity < 0.6f -> Color(0xFF00FF00)
+                    intensity < 0.8f -> Color(0xFFFFEB00)
+                    else -> Color(0xFFFF4500)
+                }
+
+                drawRect(
+                    color = color,
+                    topLeft = Offset(x, y),
+                    size = Size(barWidth - 1, rowHeight)
+                )
+            }
         }
     }
 }
