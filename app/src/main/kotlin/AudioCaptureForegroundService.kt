@@ -7,10 +7,10 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -57,11 +57,6 @@ class AudioCaptureForegroundService : Service() {
         }
     }
 
-    private val routingChangedListener = AudioManager.OnAudioRoutingChangedListener { _, _ ->
-        Log.i(TAG, "Audio routing changed")
-        sendAudioLostBroadcast()
-    }
-
     private fun sendAudioLostBroadcast() {
         val intent = Intent(ACTION_AUDIO_LOST)
         sendBroadcast(intent)
@@ -73,12 +68,12 @@ class AudioCaptureForegroundService : Service() {
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
         val focusGain = AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
-        val usage = AudioManager.USAGE_MEDIA
-        focusRequest = AudioFocusRequest.Builder(focusGain)
-            .setUsage(usage)
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
             .build()
-
-        audioManager.addOnAudioRoutingChangedListener(routingChangedListener, Handler(android.os.Looper.getMainLooper()))
+        focusRequest = AudioFocusRequest.Builder(focusGain)
+            .setAudioAttributes(audioAttributes)
+            .build()
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -93,7 +88,6 @@ class AudioCaptureForegroundService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        audioManager.removeOnAudioRoutingChangedListener(routingChangedListener)
     }
     
     fun updateNotification(state: String) {

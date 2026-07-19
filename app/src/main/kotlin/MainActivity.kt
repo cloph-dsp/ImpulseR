@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.WindowManager
@@ -93,7 +94,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         val filter = IntentFilter(AudioCaptureForegroundService.ACTION_AUDIO_LOST)
-        registerReceiver(audioLostReceiver, filter)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(audioLostReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(audioLostReceiver, filter)
+        }
 
         setContent {
             var uiState by remember { mutableStateOf(UIState.IDLE) }
