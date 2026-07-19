@@ -83,19 +83,17 @@ class MainActivity : ComponentActivity() {
                 when (currentState) {
                     AppState.SWEEPING -> {
                         NativeEngine.stopSweep()
-                        NativeEngine.statusMessage.value = "Capture aborted: audio device changed"
                     }
                     AppState.CALIBRATING -> {
                         // ponytail: no native calibration cancel — discard resets to IDLE cleanly
                         NativeEngine.discard()
-                        NativeEngine.statusMessage.value = "Calibration aborted: audio device changed"
                     }
                     else -> {}
                 }
             }
         }
         val filter = IntentFilter(AudioCaptureForegroundService.ACTION_AUDIO_LOST)
-        registerReceiver(audioLostReceiver, filter, Context.NOT_EXPORTED)
+        registerReceiver(audioLostReceiver, filter)
 
         setContent {
             var uiState by remember { mutableStateOf(UIState.IDLE) }

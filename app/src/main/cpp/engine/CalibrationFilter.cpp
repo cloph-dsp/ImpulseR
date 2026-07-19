@@ -388,7 +388,7 @@ int CalibrationFilter::nextPowerOf2(int n) const {
     return power;
 }
 
-std::vector<CalibrationFilter::CalibrationCapture>
+std::vector<CalibrationCapture>
 CalibrationFilter::captureMultiple(int count, int sampleRate) {
     std::vector<CalibrationCapture> captures;
     captures.reserve(count);
@@ -423,7 +423,11 @@ CalibrationFilter::captureMultiple(int count, int sampleRate) {
             return {};
         }
 
-        std::vector<float> invFir = mFilter;
+        std::vector<std::complex<float>> invFir(N_fft);
+        for (size_t i = 0; i < mFilter.size() && i < static_cast<size_t>(N_fft); ++i) {
+            invFir[i] = mFilter[i];
+        }
+        fft_inplace(invFir);
 
         float sumSqRec = 0.0f;
         for (int i = 0; i < captureSamples; ++i) sumSqRec += recordedESS[i] * recordedESS[i];
@@ -485,7 +489,7 @@ CalibrationFilter::buildInverseFromCaptures(const std::vector<CalibrationCapture
          captures.size() > 2 ? captures[2].correlationScore : 0.0f);
 
     int flen = kFilterLength;
-    std::vector<float> avgFilter(flen, 0.0f);
+    std::vector<std::complex<float>> avgFilter(flen, std::complex<float>(0.0f, 0.0f));
     for (int i = 0; i < nUse; ++i) {
         const auto& cap = *sorted[i];
         int capLen = static_cast<int>(cap.inverseFilter.size());
@@ -494,13 +498,14 @@ CalibrationFilter::buildInverseFromCaptures(const std::vector<CalibrationCapture
     }
     for (int i = 0; i < flen; ++i) avgFilter[i] /= static_cast<float>(nUse);
 
-    // Hann window
+    // Hann window and convert back to float (time-domain FIR)
+    std::vector<float> avgFilterReal(flen, 0.0f);
     for (int i = 0; i < flen; ++i) {
         float w = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / (flen - 1)));
-        avgFilter[i] *= w;
+        avgFilterReal[i] = avgFilter[i].real() * w;
     }
 
-    return avgFilter;
+    return avgFilterReal;
 }
 
 } // namespace impulser
